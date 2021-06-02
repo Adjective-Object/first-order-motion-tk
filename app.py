@@ -18,6 +18,8 @@ from demo import load_checkpoints
 
 import tkinter as tk
 
+USE_CPU = not torch.cuda.is_available()
+
 def prep_frame(frame):
     frame = cv2.flip(frame, 1)
 
@@ -30,11 +32,13 @@ def prep_frame(frame):
 
     return resize(frame, (256, 256))[..., :3]
 
+
 class VideoDisplay(tk.Widget):
-    def __init__(self, parent, cap, crop=False):
+    def __init__(self, parent, cap, oncamloaded=None, crop=False):
         tk.Frame.__init__(self, parent)
         self.cap = cap
-        self.crop=crop
+        self.crop = crop
+        self.oncamloaded = oncamloaded
 
         if cap and not cap.isOpened():
             raise ValueError("Cap was not open?")
@@ -50,9 +54,10 @@ class VideoDisplay(tk.Widget):
         if cap is None:
             self.imgtk = None
             self.img = None
+        if self.oncamloaded is not None:
+            self.oncamloaded()
 
     def show_frame(self):
-        print("SHOW FRAME", self.__hash__())
         if self.cap is not None:
             ret, frame = self.cap.read()
             if frame is not None:
@@ -71,21 +76,19 @@ class VideoDisplay(tk.Widget):
 
 
 class VideoCapture(tk.Widget):
-    def __init__(self, parent, oncamloaded):
+    def __init__(self, parent, oncamloaded=None):
         tk.Frame.__init__(self, parent)
 
         self.refresh_button = tk.Button(self)
         self.refresh_button["text"] = "Refresh Camera List"
         self.refresh_button["command"] = self.update_camera_list_and_repack
 
-        self.oncamloaded = oncamloaded
-
         self.reopen_button = tk.Button(self)
         self.reopen_button["text"] = "Reopen Current Camera"
         self.reopen_button["command"] = self.update_capture
 
         self.cam_dropdown = None
-        self.video_display = VideoDisplay(self, None, crop=False)
+        self.video_display = VideoDisplay(self, None, oncamloaded=oncamloaded, crop=False)
         self.error_label = tk.Label(self, fg="red")
 
         self.repack()
@@ -179,7 +182,7 @@ class GetInputsApplication(tk.Frame):
         self.pack_button()
         self.image_label = tk.Label(self)
         self.pack_preview_img()
-        self.video_capture = VideoCapture(self, self.check_steal_button)
+        self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
         self.pack_videocapture()
 
     def load_complete(self, res):
@@ -248,6 +251,144 @@ class GetInputsApplication(tk.Frame):
             self.quit()
 
 
+class Distorter(tk.Frame):
+    def __init__(self, parent, source_image, video_capture, generator, kp_detector):
+        tk.Frame.__init__(self, parent)
+        self.source_image = source_image
+        self.source_image_arr = np.asarray(self.source_image)[..., :3] / 255
+        self.video_capture = video_capture
+        self.generator = generator
+        self.kp_detector = kp_detector
+
+        self.use_relative_movement = tk.BooleanVar(self, True)
+        self.use_relative_jacobian = tk.BooleanVar(self, True)
+        self.adapt_movement_scale = tk.BooleanVar(self, True)
+
+        self.pending_frame_promise = None
+        self.kp_driving_initial = None
+        self.kp_source = None
+        self.source_tensor = None
+        self.running = False
+
+        self.init_network()
+
+        self.pack()
+        self.create_widgets()
+
+    def get_prepped_frame(self):
+        frame = self.video_capture.read()[1]
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+        frame = prep_frame(frame)
+        return frame
+
+    def init_network(self):
+        frame = self.get_prepped_frame()
+
+        self.source_tensor = torch.tensor(
+            self.source_image_arr[np.newaxis].astype(np.float32)
+        ).permute(0, 3, 1, 2)
+        if not USE_CPU:
+            self.source_tensor = self.source_tensor.cuda()
+
+        kp_driving_initial_future = executor.submit(
+            oneshot_run_kp, self.kp_detector, frame
+        )
+        kp_driving_initial_future.add_done_callback(self.set_kp_driving_initial)
+
+        kp_source_future = executor.submit(oneshot_run_kp, self.kp_detector, self.source_image_arr)
+        kp_source_future.add_done_callback(self.set_kp_source)
+
+    def set_kp_driving_initial(self, kp_driving_initial_future):
+        print("calculated kp_driving_initial")
+        self.kp_driving_initial = kp_driving_initial_future.result()
+        self.check_and_start_run()
+
+    def set_kp_source(self, kp_source_future):
+        print("calculated kp_source")
+        self.kp_source = kp_source_future.result()
+        self.check_and_start_run()
+    
+    def check_and_start_run(self):
+        if self.running:
+            return
+        elif self.kp_driving_initial and self.kp_source:
+            self.running = True
+            self.show_frame()
+    
+    def show_frame(self):
+        future = executor.submit(
+            self.run_network_frame,
+            self.get_prepped_frame(),
+            self.source_tensor,
+            self.kp_source,
+            self.kp_driving_initial,
+            self.use_relative_movement.get(),
+            self.use_relative_jacobian.get(),
+            self.adapt_movement_scale.get(),
+            self.generator
+        )
+        future.add_done_callback(self.render_and_run_again)
+    
+    def render_and_run_again(self, im_arr_future):
+        self.img = Image.fromarray(
+            cv2.cvtColor(
+                (im_arr_future.result() * 255).astype(np.uint8),
+            cv2.COLOR_RGB2BGR)
+        )
+        self.imgtk = ImageTk.PhotoImage(image=self.img)
+        self.image_label.configure(image=self.imgtk)
+        self.show_frame()
+
+    def run_network_frame(
+        self,
+        frame,
+        source_tensor,
+        kp_source,
+        kp_driving_initial,
+        use_relative_movement,
+        use_relative_jacobian,
+        adapt_movement_scale,
+        generator
+    ):
+        driving_frame = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(
+            0, 3, 1, 2
+        )
+
+        if not USE_CPU:
+            driving_frame = driving_frame.cuda()
+
+        kp_driving = kp_detector(driving_frame)
+        kp_norm = normalize_kp(
+            kp_source=kp_source,
+            kp_driving=kp_driving,
+            kp_driving_initial=kp_driving_initial,
+            use_relative_movement=use_relative_movement,
+            use_relative_jacobian=use_relative_jacobian,
+            adapt_movement_scale=adapt_movement_scale,
+        )
+        
+
+        out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
+        im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
+        im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
+
+        return im
+
+    def create_widgets(self):
+        self.img = self.source_image
+        self.imgtk = ImageTk.PhotoImage(image=self.img)
+        self.image_label = tk.Label(self, image=self.imgtk)
+        self.image_label.pack(side="left")
+
+
+def oneshot_run_kp(kp_detector, frame):
+    source1 = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2)
+    if not USE_CPU:
+        source1 = source1.cuda()
+
+    return kp_detector(source1)
+
+
 class RunSimulationApplication(tk.Frame):
     def __init__(
         self, source_image, video_capture, generator, kp_detector, master=None
@@ -263,6 +404,8 @@ class RunSimulationApplication(tk.Frame):
         self.create_widgets()
 
     def create_widgets(self):
+        self.distorter = Distorter(self, self.source_image, self.video_capture, self.generator, self.kp_detector)
+        self.distorter.pack(side="left")
         self.video_display = VideoDisplay(self, self.video_capture, crop=True)
         self.video_display.pack(side="right")
 
@@ -307,88 +450,89 @@ app2.destroy()
 root.destroy()
 
 
-if param_inputimg and param_inputcap:
-    USE_CPU = not torch.cuda.is_available()
+# if param_inputimg and param_inputcap:
+#     USE_CPU = not torch.cuda.is_available()
 
-    if USE_CPU:
-        print("CUDA IS NOT AVAILABLE: USING CPU RENDERING")
+#     if USE_CPU:
+#         print("CUDA IS NOT AVAILABLE: USING CPU RENDERING")
 
-    relative = True
-    adapt_movement_scale = False
+#     relative = True
+#     adapt_movement_scale = False
 
-    source_image = np.asarray(param_inputimg)
-    print(source_image.shape)
-    source_image = source_image[..., :3] / 255
-    print(source_image.shape)
-    cap = param_inputcap
+#     source_image = np.asarray(param_inputimg)
+#     print(source_image.shape)
+#     source_image = source_image[..., :3] / 255
+#     print(source_image.shape)
+#     cap = param_inputcap
 
-    # render just the camera for a frame while we load
-    ret, frame = cap.read()
-    frame = prep_frame(frame)
-    cv2.imshow("Face Borrower", frame)
+#     # render just the camera for a frame while we load
+#     ret, frame = cap.read()
+#     frame = prep_frame(frame)
+#     cv2.imshow("Face Borrower", frame)
 
-    if not os.path.exists("temp"):
-        os.mkdir("temp")
+#     if not os.path.exists("temp"):
+#         os.mkdir("temp")
 
-    count = 0
-    try:
-        while True:
+#     count = 0
+#     try:
+#         while True:
 
-            ret, frame = cap.read()
+#             ret, frame = cap.read()
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-            with torch.no_grad():
-                predictions = []
-                source = torch.tensor(
-                    source_image[np.newaxis].astype(np.float32)
-                ).permute(0, 3, 1, 2)
-                if USE_CPU:
-                    source = source.cuda()
-                kp_source = kp_detector(source)
-                ims = [source_image]
-                frame = prep_frame(frame)
+#             if cv2.waitKey(1) & 0xFF == ord("q"):
+#                 break
+#             with torch.no_grad():
+#                 predictions = []
+#                 source = torch.tensor(
+#                     source_image[np.newaxis].astype(np.float32)
+#                 ).permute(0, 3, 1, 2)
+#                 if not USE_CPU:
+#                     source = source.cuda()
+#                 kp_source = kp_detector(source)
+#                 ims = [source_image]
+#                 frame = prep_frame(frame)
 
-                if count == 0:
-                    source_image1 = frame
-                    source1 = torch.tensor(
-                        source_image1[np.newaxis].astype(np.float32)
-                    ).permute(0, 3, 1, 2)
-                    kp_driving_initial = kp_detector(source1)
+#                 if count == 0:
+#                     source_image1 = frame
+#                     source1 = torch.tensor(
+#                         source_image1[np.newaxis].astype(np.float32)
+#                     ).permute(0, 3, 1, 2)
+#                     kp_driving_initial = kp_detector(source1)
 
-                if count % 1 == 0:
-                    frame_test = torch.tensor(
-                        frame[np.newaxis].astype(np.float32)
-                    ).permute(0, 3, 1, 2)
+#                 if count % 1 == 0:
+#                     frame_test = torch.tensor(
+#                         frame[np.newaxis].astype(np.float32)
+#                     ).permute(0, 3, 1, 2)
 
-                    driving_frame = frame_test
-                    if not USE_CPU:
-                        driving_frame = driving_frame.cuda()
-                    kp_driving = kp_detector(driving_frame)
-                    kp_norm = normalize_kp(
-                        kp_source=kp_source,
-                        kp_driving=kp_driving,
-                        kp_driving_initial=kp_driving_initial,
-                        use_relative_movement=relative,
-                        use_relative_jacobian=relative,
-                        adapt_movement_scale=adapt_movement_scale,
-                    )
-                    out = generator(source, kp_source=kp_source, kp_driving=kp_norm)
-                    #         predictions.append(np.transpose(out['prediction'].data.cpu().numpy(), [0, 2, 3, 1])[0])
-                    im = np.transpose(
-                        out["prediction"].data.cpu().numpy(), [0, 2, 3, 1]
-                    )[0]
-                    im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
-                joinedFrame = np.concatenate((im, frame), axis=1)
+#                     driving_frame = frame_test
+#                     if not USE_CPU:
+#                         driving_frame = driving_frame.cuda()
+#                     kp_driving = kp_detector(driving_frame)
+#                     kp_norm = normalize_kp(
+#                         kp_source=kp_source,
+#                         kp_driving=kp_driving,
+#                         kp_driving_initial=kp_driving_initial,
+#                         use_relative_movement=relative,
+#                         use_relative_jacobian=relative,
+#                         adapt_movement_scale=adapt_movement_scale,
+#                     )
+                
+#                     out = generator(source, kp_source=kp_source, kp_driving=kp_norm)
+#                     #         predictions.append(np.transpose(out['prediction'].data.cpu().numpy(), [0, 2, 3, 1])[0])
+#                     im = np.transpose(
+#                         out["prediction"].data.cpu().numpy(), [0, 2, 3, 1]
+#                     )[0]
+#                     im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
+#                 joinedFrame = np.concatenate((im, frame), axis=1)
 
-                #         joinedFrameToSave = np.uint8(256 * joinedFrame)
-                #             out1.write(joinedFrameToSave)
+#                 #         joinedFrameToSave = np.uint8(256 * joinedFrame)
+#                 #             out1.write(joinedFrameToSave)
 
-                cv2.imshow("Face Borrower", joinedFrame)
+#                 cv2.imshow("Face Borrower", joinedFrame)
 
-                count += 1
-    except:
-        raise
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
+#                 count += 1
+#     except:
+#         raise
+#     finally:
+#         cap.release()
+#         cv2.destroyAllWindows()
