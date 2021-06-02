@@ -1,1 +1,1 @@
-docker build -t first-order-model .
+podman build -t first-order-model .
