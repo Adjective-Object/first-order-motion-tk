@@ -1,10 +1,8 @@
 import os.path
-from tkinter.constants import S
 import cv2
 import torch
 import zipfile
 import numpy as np
-import matplotlib.pyplot as plt
 import gdown
 import warnings
 from PIL import ImageTk, Image
@@ -19,11 +17,15 @@ from demo import load_checkpoints
 import tkinter as tk
 
 USE_CPU = not torch.cuda.is_available()
+INSTALLDIR = os.path.dirname(__file__)
 
-def prep_frame(frame):
+
+def prep_frame(frame, zoom_factor=0.8):
     frame = cv2.flip(frame, 1)
 
-    w = int(min(*frame.shape[0:2]) * 0.8)
+    zoom_factor = max(min(zoom_factor if zoom_factor is not None else 0.8, 1), 0.25)
+
+    w = int(min(*frame.shape[0:2]) * zoom_factor)
     h = w
     x = frame.shape[1] // 2 - w // 2
     y = frame.shape[0] // 2 - h // 2
@@ -34,11 +36,12 @@ def prep_frame(frame):
 
 
 class VideoDisplay(tk.Widget):
-    def __init__(self, parent, cap, oncamloaded=None, crop=False):
+    def __init__(self, parent, cap, oncamloaded=None, zoom_factor_var=None, crop=True):
         tk.Frame.__init__(self, parent)
         self.cap = cap
         self.crop = crop
         self.oncamloaded = oncamloaded
+        self.zoom_factor_var = zoom_factor_var
 
         if cap and not cap.isOpened():
             raise ValueError("Cap was not open?")
@@ -63,7 +66,12 @@ class VideoDisplay(tk.Widget):
             if frame is not None:
                 cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
                 if self.crop:
-                    cv2image = (prep_frame(cv2image) * 255).astype(np.uint8)
+                    zoom_factor = (
+                        self.zoom_factor_var.get() if self.zoom_factor_var else None
+                    )
+                    cv2image = (
+                        prep_frame(cv2image, zoom_factor=zoom_factor) * 255
+                    ).astype(np.uint8)
                 self.img = Image.fromarray(cv2image)
                 self.imgtk = ImageTk.PhotoImage(image=self.img)
                 self.image_label.configure(image=self.imgtk)
@@ -88,7 +96,9 @@ class VideoCapture(tk.Widget):
         self.reopen_button["command"] = self.update_capture
 
         self.cam_dropdown = None
-        self.video_display = VideoDisplay(self, None, oncamloaded=oncamloaded, crop=False)
+        self.video_display = VideoDisplay(
+            self, None, oncamloaded=oncamloaded, crop=True
+        )
         self.error_label = tk.Label(self, fg="red")
 
         self.repack()
@@ -159,7 +169,10 @@ class VideoCapture(tk.Widget):
 class GetInputsApplication(tk.Frame):
     def __init__(self, master=None):
         super().__init__(master)
-        self.filename = tk.StringVar(self, "source_image_inputs/the_rock_colorkey.jpeg")
+        self.filename = tk.StringVar(
+            self,
+            os.path.join(INSTALLDIR, "source_image_inputs", "the_rock_colorkey.jpeg"),
+        )
 
         self.master = master
         self.pack()
@@ -178,9 +191,11 @@ class GetInputsApplication(tk.Frame):
         model_future.add_done_callback(self.load_complete)
 
         self.pack_steal_button()
-        self.hi_there = tk.Button(self)
+        left_frame = tk.Frame(self)
+        left_frame.pack(side="left")
+        self.hi_there = tk.Button(left_frame)
         self.pack_button()
-        self.image_label = tk.Label(self)
+        self.image_label = tk.Label(left_frame)
         self.pack_preview_img()
         self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
         self.pack_videocapture()
@@ -203,16 +218,16 @@ class GetInputsApplication(tk.Frame):
         self.photo_img = ImageTk.PhotoImage(self.img)
         self.image_label.configure(image=self.photo_img)
         self.image_label.image = self.photo_img
-        self.image_label.pack(side="left")
+        self.image_label.pack(side="top")
 
     def pack_button(self):
         self.hi_there["text"] = os.path.basename(self.filename.get())
         self.hi_there["command"] = self.update_img
-        self.hi_there.pack(side="left")
+        self.hi_there.pack(side="bottom")
 
     def update_img(self):
         filename = tk.filedialog.askopenfilename(
-            initialdir="./source_image_inputs",
+            initialdir=os.path.join(INSTALLDIR, "source_image_inputs"),
             title="Select a File",
             filetypes=(
                 ("Image Files", "*.png *.jpg *.jpeg *.bmp"),
@@ -252,7 +267,18 @@ class GetInputsApplication(tk.Frame):
 
 
 class Distorter(tk.Frame):
-    def __init__(self, parent, source_image, video_capture, generator, kp_detector):
+    def __init__(
+        self,
+        parent,
+        source_image,
+        video_capture,
+        generator,
+        kp_detector,
+        use_relative_movement_var=None,
+        use_relative_jacobian_var=None,
+        adapt_movement_scale_var=None,
+        zoom_factor_var=None,
+    ):
         tk.Frame.__init__(self, parent)
         self.source_image = source_image
         self.source_image_arr = np.asarray(self.source_image)[..., :3] / 255
@@ -260,9 +286,22 @@ class Distorter(tk.Frame):
         self.generator = generator
         self.kp_detector = kp_detector
 
-        self.use_relative_movement = tk.BooleanVar(self, True)
-        self.use_relative_jacobian = tk.BooleanVar(self, True)
-        self.adapt_movement_scale = tk.BooleanVar(self, True)
+        self.zoom_factor_var = zoom_factor_var
+        self.use_relative_movement = (
+            use_relative_movement_var
+            if use_relative_movement_var is not None
+            else tk.BooleanVar(self, True)
+        )
+        self.use_relative_jacobian = (
+            use_relative_jacobian_var
+            if use_relative_jacobian_var is not None
+            else tk.BooleanVar(self, True)
+        )
+        self.adapt_movement_scale = (
+            adapt_movement_scale_var
+            if adapt_movement_scale_var is not None
+            else tk.BooleanVar(self, True)
+        )
 
         self.pending_frame_promise = None
         self.kp_driving_initial = None
@@ -275,10 +314,13 @@ class Distorter(tk.Frame):
         self.pack()
         self.create_widgets()
 
+        self.after(100, self.kickoff_mainthread_start)
+
     def get_prepped_frame(self):
         frame = self.video_capture.read()[1]
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-        frame = prep_frame(frame)
+        zoom_factor = self.zoom_factor_var.get() if self.zoom_factor_var else None
+        frame = prep_frame(frame, zoom_factor=zoom_factor)
         return frame
 
     def init_network(self):
@@ -295,7 +337,9 @@ class Distorter(tk.Frame):
         )
         kp_driving_initial_future.add_done_callback(self.set_kp_driving_initial)
 
-        kp_source_future = executor.submit(oneshot_run_kp, self.kp_detector, self.source_image_arr)
+        kp_source_future = executor.submit(
+            oneshot_run_kp, self.kp_detector, self.source_image_arr
+        )
         kp_source_future.add_done_callback(self.set_kp_source)
 
     def set_kp_driving_initial(self, kp_driving_initial_future):
@@ -307,14 +351,19 @@ class Distorter(tk.Frame):
         print("calculated kp_source")
         self.kp_source = kp_source_future.result()
         self.check_and_start_run()
-    
+
     def check_and_start_run(self):
         if self.running:
             return
         elif self.kp_driving_initial and self.kp_source:
             self.running = True
+
+    def kickoff_mainthread_start(self):
+        if self.running:
             self.show_frame()
-    
+        else:
+            self.after(100, self.kickoff_mainthread_start)
+
     def show_frame(self):
         future = executor.submit(
             self.run_network_frame,
@@ -325,19 +374,23 @@ class Distorter(tk.Frame):
             self.use_relative_movement.get(),
             self.use_relative_jacobian.get(),
             self.adapt_movement_scale.get(),
-            self.generator
+            self.generator,
         )
         future.add_done_callback(self.render_and_run_again)
-    
+
     def render_and_run_again(self, im_arr_future):
-        self.img = Image.fromarray(
-            cv2.cvtColor(
-                (im_arr_future.result() * 255).astype(np.uint8),
-            cv2.COLOR_RGB2BGR)
-        )
-        self.imgtk = ImageTk.PhotoImage(image=self.img)
-        self.image_label.configure(image=self.imgtk)
-        self.show_frame()
+        try:
+            self.img = Image.fromarray(
+                cv2.cvtColor(
+                    (im_arr_future.result() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR
+                )
+            )
+            self.imgtk = ImageTk.PhotoImage(image=self.img)
+            self.image_label.configure(image=self.imgtk)
+
+            self.show_frame()
+        except:
+            self.after(1000, self.show_frame)
 
     def run_network_frame(
         self,
@@ -348,7 +401,7 @@ class Distorter(tk.Frame):
         use_relative_movement,
         use_relative_jacobian,
         adapt_movement_scale,
-        generator
+        generator,
     ):
         driving_frame = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(
             0, 3, 1, 2
@@ -366,7 +419,6 @@ class Distorter(tk.Frame):
             use_relative_jacobian=use_relative_jacobian,
             adapt_movement_scale=adapt_movement_scale,
         )
-        
 
         out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
         im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
@@ -379,6 +431,13 @@ class Distorter(tk.Frame):
         self.imgtk = ImageTk.PhotoImage(image=self.img)
         self.image_label = tk.Label(self, image=self.imgtk)
         self.image_label.pack(side="left")
+
+    def recalculate_initial_frame(self):
+        frame = self.get_prepped_frame()
+        kp_driving_initial_future = executor.submit(
+            oneshot_run_kp, self.kp_detector, frame
+        )
+        kp_driving_initial_future.add_done_callback(self.set_kp_driving_initial)
 
 
 def oneshot_run_kp(kp_detector, frame):
@@ -399,15 +458,88 @@ class RunSimulationApplication(tk.Frame):
         self.generator = generator
         self.kp_detector = kp_detector
 
+        self.use_relative_movement_var = tk.BooleanVar(self, True)
+        self.use_relative_jacobian_var = tk.BooleanVar(self, True)
+        self.adapt_movement_scale_var = tk.BooleanVar(self, True)
+        self.zoom_factor_var = tk.DoubleVar(self, 0.8)
+
         self.master = master
         self.pack()
         self.create_widgets()
 
     def create_widgets(self):
-        self.distorter = Distorter(self, self.source_image, self.video_capture, self.generator, self.kp_detector)
+        top_frame = tk.Frame(self)
+        top_frame.pack(side="top")
+        self.distorter = Distorter(
+            top_frame,
+            self.source_image,
+            self.video_capture,
+            self.generator,
+            self.kp_detector,
+            use_relative_movement_var=self.use_relative_movement_var,
+            use_relative_jacobian_var=self.use_relative_jacobian_var,
+            adapt_movement_scale_var=self.adapt_movement_scale_var,
+            zoom_factor_var=self.zoom_factor_var
+        )
         self.distorter.pack(side="left")
-        self.video_display = VideoDisplay(self, self.video_capture, crop=True)
+        self.video_display = VideoDisplay(
+            top_frame,
+            self.video_capture,
+            crop=True,
+            zoom_factor_var=self.zoom_factor_var,
+        )
         self.video_display.pack(side="right")
+
+        slider_frame = tk.Frame(self)
+        slider_frame.pack(side="bottom")
+        slider_label = tk.Label(slider_frame)
+        slider_label["text"] = "Camera Zoom:"
+        slider_label.pack(side="left")
+        slider = tk.Scale(
+            slider_frame,
+            from_=0.25,
+            to=1.0,
+            resolution=0.01,
+            variable=self.zoom_factor_var,
+            orient="horizontal",
+            sliderlength=50
+        )
+        slider.pack(side="left")
+        resetbutton = tk.Button(slider_frame)
+        resetbutton["text"] = "Reset Initial Frame"
+        resetbutton["command"] = self.distorter.recalculate_initial_frame
+        resetbutton.pack(side="right")
+
+        checkbox_frame = tk.Frame(self)
+        checkbox_frame.pack(side="bottom")
+
+        checkbox_1 = tk.Checkbutton(
+            checkbox_frame,
+            selectcolor="red",
+            text="relative_movement",
+            onvalue=True,
+            offvalue=False,
+            variable=self.use_relative_movement_var,
+        )
+        checkbox_1.pack(side="left")
+        checkbox_2 = tk.Checkbutton(
+            checkbox_frame,
+            selectcolor="red",
+            text="relative_jacobian",
+            onvalue=True,
+            offvalue=False,
+            variable=self.use_relative_jacobian_var,
+        )
+        checkbox_2.pack(side="left")
+        checkbox_3 = tk.Checkbutton(
+            checkbox_frame,
+            selectcolor="red",
+            text="adapt_movement_scale",
+            onvalue=True,
+            offvalue=False,
+            variable=self.adapt_movement_scale_var,
+        )
+        checkbox_3.pack(side="left")
 
 
 param_inputimg = None
@@ -516,7 +648,7 @@ root.destroy()
 #                         use_relative_jacobian=relative,
 #                         adapt_movement_scale=adapt_movement_scale,
 #                     )
-                
+
 #                     out = generator(source, kp_source=kp_source, kp_driving=kp_norm)
 #                     #         predictions.append(np.transpose(out['prediction'].data.cpu().numpy(), [0, 2, 3, 1])[0])
 #                     im = np.transpose(
