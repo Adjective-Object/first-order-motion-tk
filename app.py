@@ -19,6 +19,12 @@ import tkinter as tk
 USE_CPU = not torch.cuda.is_available()
 INSTALLDIR = os.path.dirname(__file__)
 
+print(
+    "WARNING: CUDA not available, falling back to CPU. THIS WILL BE HORRIBLY SLOW"
+    if USE_CPU
+    else "Found CUDA, running the neural network with hardware acceleration."
+)
+
 
 def prep_frame(frame, zoom_factor=0.8):
     frame = cv2.flip(frame, 1)
@@ -479,7 +485,7 @@ class RunSimulationApplication(tk.Frame):
             use_relative_movement_var=self.use_relative_movement_var,
             use_relative_jacobian_var=self.use_relative_jacobian_var,
             adapt_movement_scale_var=self.adapt_movement_scale_var,
-            zoom_factor_var=self.zoom_factor_var
+            zoom_factor_var=self.zoom_factor_var,
         )
         self.distorter.pack(side="left")
         self.video_display = VideoDisplay(
@@ -502,7 +508,7 @@ class RunSimulationApplication(tk.Frame):
             resolution=0.01,
             variable=self.zoom_factor_var,
             orient="horizontal",
-            sliderlength=50
+            sliderlength=50,
         )
         slider.pack(side="left")
         resetbutton = tk.Button(slider_frame)
@@ -552,7 +558,7 @@ def download_and_load_model():
     model_checkpoint_exist = os.path.exists("extract/vox-cpk.pth.tar")
     if not model_checkpoint_exist:
         url = "https://drive.google.com/uc?id=1wCzJP1XJNB04vEORZvPjNz6drkXm5AUK"
-        output = "temp/checkpoints.zip"
+        output = os.path.join("temp", "checkpoints.zip")
         gdown.download(url, output, quiet=False)
         with zipfile.ZipFile(output, "r") as zip_ref:
             zip_ref.extractall("extract")
