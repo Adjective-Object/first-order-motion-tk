@@ -552,7 +552,7 @@ param_inputimg = None
 param_inputcap = None
 
 
-def download_and_load_model():
+def download_and_load_model(use_advanced=False):
     USE_CPU = not torch.cuda.is_available()
 
     model_checkpoint_exist = os.path.exists("extract/vox-cpk.pth.tar")
@@ -564,8 +564,8 @@ def download_and_load_model():
             zip_ref.extractall("extract")
 
     generator, kp_detector = load_checkpoints(
-        config_path="config/vox-256.yaml",
-        checkpoint_path="extract/vox-cpk.pth.tar",
+        config_path=("config/vox-adv-256.yaml" if use_advanced else "config/vox-256.yaml"),
+        checkpoint_path=("extract/vox-adv-cpk.pth.tar" if use_advanced else "extract/vox-cpk.pth.tar"),
         cpu=USE_CPU,
     )
 
