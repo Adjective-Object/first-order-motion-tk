@@ -86,10 +86,6 @@ class VideoDisplay(tk.Widget):
                 self.img = Image.fromarray(cv2image)
                 self.imgtk = ImageTk.PhotoImage(image=self.img)
                 self.image_label.configure(image=self.imgtk)
-            else:
-                print("no frame?", ret)
-        else:
-            print("no cap?")
 
         self.after(10, self.show_frame)
 
