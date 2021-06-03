@@ -35,4 +35,6 @@ pipenv run pyinstaller --noconfirm app.spec
 ./dist/first-order-motion-tk/app
 # build a distributable zip
 zip -r ./dist/first-order-motion-tk-linux.zip ./dist/first-order-motion-tk
+# or, build a distributable tar.xz if the zip is too big
+tar -cf - ./dist/first-order-motion-tk | xz -4e > ./dist/first-order-motion-tk.tar.xz
 ```
