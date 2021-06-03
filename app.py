@@ -192,15 +192,13 @@ class GetInputsApplication(tk.Frame):
         self.steal_button["command"] = self.run_stolen_face
 
         self.loading_label = tk.Label(self, fg="red")
-        self.loading_label["text"] = "Loading neural network.."
+        self.loading_label["text"] = "Loading neural network.." if not model_needs_download_at_start else "Downloading model, this might take a few minutes.."
         self.loading_label.pack(side="bottom")
 
         if USE_CPU:
             cuda_warning = tk.Label(self, fg="red")
             cuda_warning["text"] = "WARNING: Could not find CUDA. The neural network will be run on the CPU, and will not be realtime capable."
             cuda_warning.pack(side="bottom")
-
-        model_future.add_done_callback(self.load_complete)
 
         self.pack_steal_button()
         left_frame = tk.Frame(self)
@@ -211,6 +209,9 @@ class GetInputsApplication(tk.Frame):
         self.pack_preview_img()
         self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
         self.pack_videocapture()
+
+    def download_complete(self):
+        self.loading_label["text"] = "Download complete, loading model"
 
     def load_complete(self, res):
         self.loading_label["text"] = "model loaded!"
@@ -557,18 +558,19 @@ class RunSimulationApplication(tk.Frame):
 param_inputimg = None
 param_inputcap = None
 
+model_checkpoint_exist = os.path.exists("extract/vox-cpk.pth.tar")
 
-def download_and_load_model(use_advanced=False):
-    USE_CPU = not torch.cuda.is_available()
+def download_model():
+    if not os.path.exists("temp"):
+        os.mkdir("temp")
 
-    model_checkpoint_exist = os.path.exists("extract/vox-cpk.pth.tar")
-    if not model_checkpoint_exist:
-        url = "https://drive.google.com/uc?id=1wCzJP1XJNB04vEORZvPjNz6drkXm5AUK"
-        output = os.path.join("temp", "checkpoints.zip")
-        gdown_download(url, output, quiet=False)
-        with zipfile.ZipFile(output, "r") as zip_ref:
-            zip_ref.extractall("extract")
+    url = "https://drive.google.com/uc?id=1wCzJP1XJNB04vEORZvPjNz6drkXm5AUK"
+    output = os.path.join("temp", "checkpoints.zip")
+    gdown_download(url, output, quiet=False)
+    with zipfile.ZipFile(output, "r") as zip_ref:
+        zip_ref.extractall("extract")
 
+def load_model(use_advanced=False):
     generator, kp_detector = load_checkpoints(
         config_path=("config/vox-adv-256.yaml" if use_advanced else "config/vox-256.yaml"),
         checkpoint_path=("extract/vox-adv-cpk.pth.tar" if use_advanced else "extract/vox-cpk.pth.tar"),
@@ -577,12 +579,23 @@ def download_and_load_model(use_advanced=False):
 
     return generator, kp_detector
 
+def download_and_load_model(app):
+    if model_needs_download_at_start:
+        print("downloading model")
+        download_model()
+        app.download_complete()
+    print("loading model")
+    return load_model()
 
+model_needs_download_at_start = not os.path.exists(os.path.join('extract', 'vox-adv-cpk.pth.tar'))
 executor = concurrent.futures.ThreadPoolExecutor()
-model_future = executor.submit(download_and_load_model)
 
 root = tk.Tk()
 app = GetInputsApplication(master=root)
+
+model_future = executor.submit(download_and_load_model, app)
+model_future.add_done_callback(app.load_complete)
+
 app.mainloop()
 app.destroy()
 generator, kp_detector = model_future.result()
