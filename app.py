@@ -587,7 +587,7 @@ def download_and_load_model(app):
     print("loading model")
     return load_model()
 
-model_needs_download_at_start = not os.path.exists(os.path.join('extract', 'vox-adv-cpk.pth.tar'))
+model_needs_download_at_start = not os.path.exists(os.path.join('extract', 'vox-cpk.pth.tar'))
 executor = concurrent.futures.ThreadPoolExecutor()
 
 root = tk.Tk()

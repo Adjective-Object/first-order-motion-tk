@@ -16,7 +16,7 @@ based on https://github.com/AliaksandrSiarohin/first-order-model and https://git
 ## Setup and running from source
 
 ```sh
-pipenv install
+pipenv install --dev
 pipenv run python ./app.py
 ```
 
@@ -24,7 +24,7 @@ pipenv run python ./app.py
 
 ```sh
 # get dependencies (including pyinstaller)
-pipenv install
+pipenv install --dev
 
 # Before proceeding, update the absolute paths in app.spec so they
 # are accurate on your machine.

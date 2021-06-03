@@ -17,7 +17,7 @@ a = Analysis(['app.py'],
                 # Update this file before running pyinstaller
                 # gdown disabled since it doesn't package properly anyway
                 # ('/home/adjective/.local/share/virtualenvs/real-time-example-of-first-order-motion-mo-LCLaGxN7/lib/python3.9/site-packages/gdown','gdown'),
-                ('/usr/lib64/python3.9/site-packages/PIL','PIL'),
+                # ('/usr/lib64/python3.9/site-packages/PIL','PIL'),
              ],
              hiddenimports=[
                  'gdown',
