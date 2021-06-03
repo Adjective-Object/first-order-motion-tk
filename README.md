@@ -13,6 +13,14 @@ based on https://github.com/AliaksandrSiarohin/first-order-model and https://git
 - [pipenv](https://pipenv.pypa.io/en/latest/install/)
 - A [CUDA-Capable](https://developer.nvidia.com/cuda-gpus#compute) NVIDIA Graphics card + [drivers](https://developer.nvidia.com/cuda-downloads)
 
+## Controls
+
+- `relative_movement`: When checked, this toggle poses target face based on the changes in the pose of your own face makes. When not checked, the target face will be mapped directly onto the position / shape of your face.
+- `relative_jacobian`: When checked, if relative_movement is active, applies distortions to the model's impression of your face relative to the starting position to the base face. When `relative_movement` is turned on but `relative_jacobian` is turned off, the pose will be reconstructed relatively, but the model will try to reconstruct the face based on the shape of your face.
+- `adapt_movement_scale`: When checked, this will re-scale your movements based on the size of the target face. For example, if the target face is larger than yours and you rotate your head, the target face will be rotated approximately around its own neck, instead of around where _your_ neck would be.
+- `camera_zoom`: controls how tightly the input image is cropped about the center
+- `reset_initial_frame`: resets the initial frame used in relative_movement and relative_jacobian to the current frame of the camera.
+
 ## Setup and running from source
 
 ```sh
