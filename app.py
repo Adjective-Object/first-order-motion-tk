@@ -7,6 +7,7 @@ import warnings
 from PIL import ImageTk, Image
 import concurrent.futures
 from time import time
+import webbrowser
 
 try:
     from gdown import download as gdown_download
@@ -20,9 +21,11 @@ from normalize_kp import normalize_kp
 from demo import load_checkpoints
 
 import tkinter.filedialog
+import tkinter.font
 import tkinter as tk
 
 USE_CPU = not torch.cuda.is_available()
+# USE_CPU = True
 INSTALLDIR = os.path.dirname(__file__)
 
 print(
@@ -197,6 +200,15 @@ class GetInputsApplication(tk.Frame):
         self.loading_label.pack(side="bottom")
 
         if USE_CPU:
+
+            cuda_link = tk.Label(self, fg='red', cursor="hand2")
+            cuda_link['text'] = "You can get the drivers at https://developer.nvidia.com/cuda-downloads"
+            cuda_link.bind("<Button-1>", lambda e: webbrowser.open("https://developer.nvidia.com/cuda-downloads"))
+            cuda_link.pack(side="bottom")
+            f = tkinter.font.Font(cuda_link, cuda_link.cget("font"))
+            f.configure(underline = True)
+            cuda_link.configure(font=f)
+
             cuda_warning = tk.Label(self, fg="red")
             cuda_warning["text"] = "WARNING: Could not find CUDA. The neural network will be run on the CPU, and will not be realtime capable."
             cuda_warning.pack(side="bottom")
