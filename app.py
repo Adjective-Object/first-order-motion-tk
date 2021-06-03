@@ -18,6 +18,7 @@ from skimage.transform import resize
 from normalize_kp import normalize_kp
 from demo import load_checkpoints
 
+import tkinter.filedialog
 import tkinter as tk
 
 USE_CPU = not torch.cuda.is_available()
