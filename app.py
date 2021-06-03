@@ -240,7 +240,7 @@ class GetInputsApplication(tk.Frame):
         self.select_image_button.pack(side="bottom")
 
     def update_img(self):
-        filename = tk.filedialog.askopenfilename(
+        filename = tkinter.filedialog.askopenfilename(
             initialdir=os.path.join(INSTALLDIR, "source_image_inputs"),
             title="Select a File",
             filetypes=(
