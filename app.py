@@ -1,3 +1,5 @@
+from concurrent.futures.process import ProcessPoolExecutor
+from concurrent.futures.thread import ThreadPoolExecutor
 import os.path
 import cv2
 import torch
@@ -5,9 +7,9 @@ import zipfile
 import numpy as np
 import warnings
 from PIL import ImageTk, Image
-import concurrent.futures
 from time import time
 import webbrowser
+import multiprocessing as mp
 
 try:
     from gdown import download as gdown_download
@@ -24,7 +26,6 @@ import tkinter.font
 import tkinter as tk
 
 USE_CPU = not torch.cuda.is_available()
-# USE_CPU = True
 INSTALLDIR = os.path.dirname(__file__)
 
 print(
@@ -93,6 +94,7 @@ class VideoDisplay(tk.Widget):
         self.after(VIDEO_DISPLAY_FRAME_DELAY, self.request_frame)
     
     def notify_needs_show_frame(self, frame_future):
+        # print("notify_needs_show_frame", os.getppid())
         frame = frame_future.result()
         if frame:
             self.img = frame
@@ -108,6 +110,7 @@ class VideoDisplay(tk.Widget):
             self.after(VIDEO_DISPLAY_FRAME_DELAY, self.poll_frame)
 
     def capture_frame(self):
+        # print("capture_frame", os.getppid())
         if self.cap is not None:
             ret, frame = self.cap.read()
             if frame is not None:
@@ -215,6 +218,7 @@ class GetInputsApplication(tk.Frame):
         self.master = master
         self.pack()
         self.create_widgets()
+        self.model_ready = False
 
         self.check_steal_button()
 
@@ -223,11 +227,10 @@ class GetInputsApplication(tk.Frame):
         self.steal_button["command"] = self.run_stolen_face
 
         self.loading_label = tk.Label(self, fg="red")
-        self.loading_label["text"] = "Loading neural network.." if not model_needs_download_at_start else "Downloading model, this might take a few minutes.."
+        self.loading_label["text"] = "Loading neural network.." if was_model_loaded_at_start() else "Downloading model, this might take a few minutes.."
         self.loading_label.pack(side="bottom")
 
         if USE_CPU:
-
             cuda_link = tk.Label(self, fg='red', cursor="hand2")
             cuda_link['text'] = "You can get the drivers at https://developer.nvidia.com/cuda-downloads"
             cuda_link.bind("<Button-1>", lambda e: webbrowser.open("https://developer.nvidia.com/cuda-downloads"))
@@ -256,6 +259,7 @@ class GetInputsApplication(tk.Frame):
     def load_complete(self, res):
         self.loading_label["text"] = "model loaded!"
         self.loading_label["fg"] = "green"
+        self.model_ready = True
         self.check_steal_button()
 
     def pack_steal_button(self):
@@ -300,7 +304,7 @@ class GetInputsApplication(tk.Frame):
             self.img is not None
             and self.video_capture.video_display.cap is not None
             and self.video_capture.video_display.cap.isOpened()
-            and model_future.done()
+            and self.model_ready
         ):
             self.steal_button["state"] = tk.ACTIVE
         else:
@@ -318,7 +322,7 @@ class GetInputsApplication(tk.Frame):
             param_inputcap = self.video_capture.video_display.cap
             self.quit()
 
-
+KICKOFF_LOOP_DELAY = 50
 class Distorter(tk.Frame):
     last_frame_time = None
     last_frame_interval_rolling_delta = 0
@@ -366,14 +370,14 @@ class Distorter(tk.Frame):
         self.kp_driving_initial = None
         self.kp_source = None
         self.source_tensor = None
-        self.running = False
+        self.initialized = False
 
         self.init_network()
 
         self.pack()
         self.create_widgets()
 
-        self.after(100, self.kickoff_mainthread_start)
+        self.after(KICKOFF_LOOP_DELAY, self.kickoff_network_loop)
 
     def get_prepped_frame(self):
         frame = self.video_capture.read()[1]
@@ -414,16 +418,16 @@ class Distorter(tk.Frame):
         self.check_and_start_run()
 
     def check_and_start_run(self):
-        if self.running:
+        if self.initialized:
             return
         elif self.kp_driving_initial and self.kp_source:
-            self.running = True
+            self.initialized = True
 
-    def kickoff_mainthread_start(self):
-        if self.running:
+    def kickoff_network_loop(self):
+        if self.initialized:
             self.request_frame()
         else:
-            self.after(100, self.kickoff_mainthread_start)
+            self.after(KICKOFF_LOOP_DELAY, self.kickoff_network_loop)
 
     def request_frame(self):
         future = executor.submit(
@@ -431,6 +435,7 @@ class Distorter(tk.Frame):
             self.get_prepped_frame_for_ml(),
             self.source_tensor,
             self.kp_source,
+            self.kp_detector,
             self.kp_driving_initial,
             self.use_relative_movement.get(),
             self.use_relative_jacobian.get(),
@@ -456,6 +461,7 @@ class Distorter(tk.Frame):
         frame,
         source_tensor,
         kp_source,
+        kp_detector,
         kp_driving_initial,
         use_relative_movement,
         use_relative_jacobian,
@@ -643,117 +649,46 @@ def load_model(use_advanced=False):
 
     return generator, kp_detector
 
+was_loaded = None
+def was_model_loaded_at_start():
+    global was_loaded
+    if was_loaded is None:
+        was_loaded = os.path.exists(os.path.join('extract', 'vox-cpk.pth.tar'))
+    return was_loaded
+
 def download_and_load_model(app):
-    if model_needs_download_at_start:
+    if not was_model_loaded_at_start():
         print("downloading model")
         download_model()
         app.download_complete()
     print("loading model")
     return load_model()
 
-model_needs_download_at_start = not os.path.exists(os.path.join('extract', 'vox-cpk.pth.tar'))
-executor = concurrent.futures.ThreadPoolExecutor(3)
 
-root = tk.Tk()
-app = GetInputsApplication(master=root)
+executor = None
 
-model_future = executor.submit(download_and_load_model, app)
-model_future.add_done_callback(app.load_complete)
+def main():
+    global executor
+    global executor
+    executor = ThreadPoolExecutor(3)
 
-app.mainloop()
-app.destroy()
-generator, kp_detector = model_future.result()
-app2 = RunSimulationApplication(
-    param_inputimg, param_inputcap, generator, kp_detector, master=root
-)
-app2.mainloop()
-app2.destroy()
-root.destroy()
+    print("start on thread", os.getppid())
 
+    root = tk.Tk()
+    app = GetInputsApplication(master=root)
 
-# if param_inputimg and param_inputcap:
-#     USE_CPU = not torch.cuda.is_available()
+    model_future = executor.submit(download_and_load_model, app)
+    model_future.add_done_callback(app.load_complete)
 
-#     if USE_CPU:
-#         print("CUDA IS NOT AVAILABLE: USING CPU RENDERING")
+    app.mainloop()
+    app.destroy()
+    generator, kp_detector = model_future.result()
+    app2 = RunSimulationApplication(
+        param_inputimg, param_inputcap, generator, kp_detector, master=root
+    )
+    app2.mainloop()
+    app2.destroy()
+    root.destroy()
 
-#     relative = True
-#     adapt_movement_scale = False
-
-#     source_image = np.asarray(param_inputimg)
-#     print(source_image.shape)
-#     source_image = source_image[..., :3] / 255
-#     print(source_image.shape)
-#     cap = param_inputcap
-
-#     # render just the camera for a frame while we load
-#     ret, frame = cap.read()
-#     frame = prep_frame(frame)
-#     cv2.imshow("Face Borrower", frame)
-
-#     if not os.path.exists("temp"):
-#         os.mkdir("temp")
-
-#     count = 0
-#     try:
-#         while True:
-
-#             ret, frame = cap.read()
-
-#             if cv2.waitKey(1) & 0xFF == ord("q"):
-#                 break
-#             with torch.no_grad():
-#                 predictions = []
-#                 source = torch.tensor(
-#                     source_image[np.newaxis].astype(np.float32)
-#                 ).permute(0, 3, 1, 2)
-#                 if not USE_CPU:
-#                     source = source.cuda()
-#                 kp_source = kp_detector(source)
-#                 ims = [source_image]
-#                 frame = prep_frame(frame)
-
-#                 if count == 0:
-#                     source_image1 = frame
-#                     source1 = torch.tensor(
-#                         source_image1[np.newaxis].astype(np.float32)
-#                     ).permute(0, 3, 1, 2)
-#                     kp_driving_initial = kp_detector(source1)
-
-#                 if count % 1 == 0:
-#                     frame_test = torch.tensor(
-#                         frame[np.newaxis].astype(np.float32)
-#                     ).permute(0, 3, 1, 2)
-
-#                     driving_frame = frame_test
-#                     if not USE_CPU:
-#                         driving_frame = driving_frame.cuda()
-#                     kp_driving = kp_detector(driving_frame)
-#                     kp_norm = normalize_kp(
-#                         kp_source=kp_source,
-#                         kp_driving=kp_driving,
-#                         kp_driving_initial=kp_driving_initial,
-#                         use_relative_movement=relative,
-#                         use_relative_jacobian=relative,
-#                         adapt_movement_scale=adapt_movement_scale,
-#                     )
-
-#                     out = generator(source, kp_source=kp_source, kp_driving=kp_norm)
-#                     #         predictions.append(np.transpose(out['prediction'].data.cpu().numpy(), [0, 2, 3, 1])[0])
-#                     im = np.transpose(
-#                         out["prediction"].data.cpu().numpy(), [0, 2, 3, 1]
-#                     )[0]
-#                     im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
-#                 joinedFrame = np.concatenate((im, frame), axis=1)
-
-#                 #         joinedFrameToSave = np.uint8(256 * joinedFrame)
-#                 #             out1.write(joinedFrameToSave)
-
-#                 cv2.imshow("Face Borrower", joinedFrame)
-
-#                 count += 1
-#     except:
-#         raise
-#     finally:
-#         cap.release()
-#         cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
