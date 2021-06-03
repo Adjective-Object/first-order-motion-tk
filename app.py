@@ -6,6 +6,7 @@ import numpy as np
 import warnings
 from PIL import ImageTk, Image
 import concurrent.futures
+from time import time
 
 try:
     from gdown import download as gdown_download
@@ -280,6 +281,8 @@ class GetInputsApplication(tk.Frame):
 
 
 class Distorter(tk.Frame):
+    last_frame = None
+
     def __init__(
         self,
         parent,
@@ -291,6 +294,7 @@ class Distorter(tk.Frame):
         use_relative_jacobian_var=None,
         adapt_movement_scale_var=None,
         zoom_factor_var=None,
+        fps_var=None,
     ):
         tk.Frame.__init__(self, parent)
         self.source_image = source_image
@@ -300,6 +304,8 @@ class Distorter(tk.Frame):
         self.kp_detector = kp_detector
 
         self.zoom_factor_var = zoom_factor_var
+        self.fps_var = fps_var
+        self.tick_fps()
         self.use_relative_movement = (
             use_relative_movement_var
             if use_relative_movement_var is not None
@@ -400,6 +406,7 @@ class Distorter(tk.Frame):
             )
             self.imgtk = ImageTk.PhotoImage(image=self.img)
             self.image_label.configure(image=self.imgtk)
+            self.tick_fps()
 
             self.show_frame()
         except:
@@ -452,6 +459,11 @@ class Distorter(tk.Frame):
         )
         kp_driving_initial_future.add_done_callback(self.set_kp_driving_initial)
 
+    def tick_fps(self):
+        now = time()
+        if self.fps_var is not None and self.last_frame is not None:
+            self.fps_var.set("fps: %01.01f" % (1 / (now - self.last_frame)))
+        self.last_frame = now
 
 def oneshot_run_kp(kp_detector, frame):
     source1 = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2)
@@ -475,6 +487,7 @@ class RunSimulationApplication(tk.Frame):
         self.use_relative_jacobian_var = tk.BooleanVar(self, True)
         self.adapt_movement_scale_var = tk.BooleanVar(self, True)
         self.zoom_factor_var = tk.DoubleVar(self, 0.8)
+        self.fps_var = tk.StringVar(self, "fps: ")
 
         self.master = master
         self.pack()
@@ -493,6 +506,7 @@ class RunSimulationApplication(tk.Frame):
             use_relative_jacobian_var=self.use_relative_jacobian_var,
             adapt_movement_scale_var=self.adapt_movement_scale_var,
             zoom_factor_var=self.zoom_factor_var,
+            fps_var=self.fps_var,
         )
         self.distorter.pack(side="left")
         self.video_display = VideoDisplay(
@@ -505,6 +519,12 @@ class RunSimulationApplication(tk.Frame):
 
         slider_frame = tk.Frame(self)
         slider_frame.pack(side="bottom")
+
+        fps_label = tk.Label(slider_frame)
+        fps_label["textvariable"] = self.fps_var
+        fps_label.pack(side="left")
+
+
         slider_label = tk.Label(slider_frame)
         slider_label["text"] = "Camera Zoom:"
         slider_label.pack(side="left")
