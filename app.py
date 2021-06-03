@@ -3,10 +3,14 @@ import cv2
 import torch
 import zipfile
 import numpy as np
-import gdown
 import warnings
 from PIL import ImageTk, Image
 import concurrent.futures
+
+try:
+    from gdown import download as gdown_download
+except:
+    print("error importing gdown. Hopefully the archive is already downloaded..")
 
 warnings.filterwarnings("ignore")
 
@@ -194,12 +198,17 @@ class GetInputsApplication(tk.Frame):
         self.loading_label["text"] = "Loading neural network.."
         self.loading_label.pack(side="bottom")
 
+        if USE_CPU:
+            cuda_warning = tk.Label(self, fg="red")
+            cuda_warning["text"] = "WARNING: Could not find CUDA. The neural network will be run on the CPU, and will not be realtime capable."
+            cuda_warning.pack(side="bottom")
+
         model_future.add_done_callback(self.load_complete)
 
         self.pack_steal_button()
         left_frame = tk.Frame(self)
         left_frame.pack(side="left")
-        self.hi_there = tk.Button(left_frame)
+        self.select_image_button = tk.Button(left_frame)
         self.pack_button()
         self.image_label = tk.Label(left_frame)
         self.pack_preview_img()
@@ -227,9 +236,9 @@ class GetInputsApplication(tk.Frame):
         self.image_label.pack(side="top")
 
     def pack_button(self):
-        self.hi_there["text"] = os.path.basename(self.filename.get())
-        self.hi_there["command"] = self.update_img
-        self.hi_there.pack(side="bottom")
+        self.select_image_button["text"] = os.path.basename(self.filename.get())
+        self.select_image_button["command"] = self.update_img
+        self.select_image_button.pack(side="bottom")
 
     def update_img(self):
         filename = tk.filedialog.askopenfilename(
@@ -559,7 +568,7 @@ def download_and_load_model(use_advanced=False):
     if not model_checkpoint_exist:
         url = "https://drive.google.com/uc?id=1wCzJP1XJNB04vEORZvPjNz6drkXm5AUK"
         output = os.path.join("temp", "checkpoints.zip")
-        gdown.download(url, output, quiet=False)
+        gdown_download(url, output, quiet=False)
         with zipfile.ZipFile(output, "r") as zip_ref:
             zip_ref.extractall("extract")
 

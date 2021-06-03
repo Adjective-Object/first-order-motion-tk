@@ -19,3 +19,11 @@ based on https://github.com/AliaksandrSiarohin/first-order-model and https://git
 pipenv install
 pipenv run python ./app.py
 ```
+
+## Building a Distributable
+
+```sh
+pipenv install pyinstaller -d
+pipenv run pyinstaller --noconfirm app.spec
+./dist/first-order-motion-tk/app
+```
