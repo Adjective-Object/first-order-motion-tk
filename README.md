@@ -46,3 +46,9 @@ zip -r ./dist/first-order-motion-tk-linux.zip ./dist/first-order-motion-tk
 # or, build a distributable tar.xz if the zip is too big
 tar -cf - ./dist/first-order-motion-tk | xz -4e > ./dist/first-order-motion-tk.tar.xz
 ```
+
+## Profiling
+
+```sh
+pipenv run py-spy record -o profile.svg --subprocesses -- python app.py
+```

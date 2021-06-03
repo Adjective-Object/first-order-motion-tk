@@ -16,7 +16,6 @@ except:
 
 warnings.filterwarnings("ignore")
 
-from skimage.transform import resize
 from normalize_kp import normalize_kp
 from demo import load_checkpoints
 
@@ -34,8 +33,15 @@ print(
     else "Found CUDA, running the neural network with hardware acceleration."
 )
 
+def bgr2rgb(arr):
+    return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+
+def rgb2bgr(arr):
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
 
 def prep_frame(frame, zoom_factor=0.8):
+    frame = bgr2rgb(frame)
     frame = cv2.flip(frame, 1)
 
     zoom_factor = max(min(zoom_factor if zoom_factor is not None else 0.8, 1), 0.25)
@@ -47,10 +53,12 @@ def prep_frame(frame, zoom_factor=0.8):
 
     frame = frame[y : y + h, x : x + w, :]
 
-    return resize(frame, (256, 256))[..., :3]
+    return Image.fromarray(frame).resize((256,256), resample=Image.NEAREST)
 
 
+VIDEO_DISPLAY_FRAME_DELAY = int(1000/24)
 class VideoDisplay(tk.Widget):
+    frame_needs_update = False
     def __init__(self, parent, cap, oncamloaded=None, zoom_factor_var=None, crop=True):
         tk.Frame.__init__(self, parent)
         self.cap = cap
@@ -65,7 +73,8 @@ class VideoDisplay(tk.Widget):
         self.imgtk = None
         self.image_label = tk.Label(self)
         self.image_label.pack(side="top")
-        self.after(10, self.show_frame)
+        self.request_frame()
+        self.after(VIDEO_DISPLAY_FRAME_DELAY, self.poll_frame)
 
     def set_cap(self, cap):
         self.cap = cap
@@ -75,23 +84,41 @@ class VideoDisplay(tk.Widget):
         if self.oncamloaded is not None:
             self.oncamloaded()
 
-    def show_frame(self):
+    def request_frame(self):
+        on_captured = executor.submit(self.capture_frame)
+        on_captured.add_done_callback(self.notify_needs_show_frame)
+        on_captured.add_done_callback(self.schedule_next_request)
+    
+    def schedule_next_request(self, frame):
+        self.after(VIDEO_DISPLAY_FRAME_DELAY, self.request_frame)
+    
+    def notify_needs_show_frame(self, frame_future):
+        frame = frame_future.result()
+        if frame:
+            self.img = frame
+            self.frame_needs_update = True
+    
+    def poll_frame(self):
+        try:
+            if self.frame_needs_update:
+                self.frame_needs_update = False
+                self.imgtk = ImageTk.PhotoImage(image=self.img)
+                self.image_label.configure(image=self.imgtk)
+        finally:
+            self.after(VIDEO_DISPLAY_FRAME_DELAY, self.poll_frame)
+
+    def capture_frame(self):
         if self.cap is not None:
             ret, frame = self.cap.read()
             if frame is not None:
-                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
                 if self.crop:
                     zoom_factor = (
                         self.zoom_factor_var.get() if self.zoom_factor_var else None
                     )
-                    cv2image = (
-                        prep_frame(cv2image, zoom_factor=zoom_factor) * 255
-                    ).astype(np.uint8)
-                self.img = Image.fromarray(cv2image)
-                self.imgtk = ImageTk.PhotoImage(image=self.img)
-                self.image_label.configure(image=self.imgtk)
-
-        self.after(10, self.show_frame)
+                    return prep_frame(frame, zoom_factor=zoom_factor)
+                else:
+                    return Image.fromarray(frame)
+        return None
 
 
 class VideoCapture(tk.Widget):
@@ -240,7 +267,7 @@ class GetInputsApplication(tk.Frame):
         self.video_capture.pack(side="bottom")
 
     def pack_preview_img(self):
-        self.img = Image.open(self.filename.get()).resize((256, 256))
+        self.img = Image.open(self.filename.get()).resize((256, 256), resample=Image.NEAREST)
         self.photo_img = ImageTk.PhotoImage(self.img)
         self.image_label.configure(image=self.photo_img)
         self.image_label.image = self.photo_img
@@ -293,7 +320,8 @@ class GetInputsApplication(tk.Frame):
 
 
 class Distorter(tk.Frame):
-    last_frame = None
+    last_frame_time = None
+    last_frame_interval_rolling_delta = 0
 
     def __init__(
         self,
@@ -349,13 +377,15 @@ class Distorter(tk.Frame):
 
     def get_prepped_frame(self):
         frame = self.video_capture.read()[1]
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
         zoom_factor = self.zoom_factor_var.get() if self.zoom_factor_var else None
         frame = prep_frame(frame, zoom_factor=zoom_factor)
         return frame
 
+    def get_prepped_frame_for_ml(self):
+        return np.array(self.get_prepped_frame())[:,:,:3] / 255
+
     def init_network(self):
-        frame = self.get_prepped_frame()
+        frame = self.get_prepped_frame_for_ml()
 
         self.source_tensor = torch.tensor(
             self.source_image_arr[np.newaxis].astype(np.float32)
@@ -391,14 +421,14 @@ class Distorter(tk.Frame):
 
     def kickoff_mainthread_start(self):
         if self.running:
-            self.show_frame()
+            self.request_frame()
         else:
             self.after(100, self.kickoff_mainthread_start)
 
-    def show_frame(self):
+    def request_frame(self):
         future = executor.submit(
             self.run_network_frame,
-            self.get_prepped_frame(),
+            self.get_prepped_frame_for_ml(),
             self.source_tensor,
             self.kp_source,
             self.kp_driving_initial,
@@ -407,22 +437,19 @@ class Distorter(tk.Frame):
             self.adapt_movement_scale.get(),
             self.generator,
         )
-        future.add_done_callback(self.render_and_run_again)
+        future.add_done_callback(self.render)
 
-    def render_and_run_again(self, im_arr_future):
-        try:
-            self.img = Image.fromarray(
-                cv2.cvtColor(
-                    (im_arr_future.result() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR
-                )
+    def render(self, im_arr_future):
+        # print("delay to consume", time() - self.last_frame_time_generated_time)
+        self.img = Image.fromarray(
+            rgb2bgr(
+                (im_arr_future.result() * 255).astype(np.uint8)
             )
-            self.imgtk = ImageTk.PhotoImage(image=self.img)
-            self.image_label.configure(image=self.imgtk)
-            self.tick_fps()
-
-            self.show_frame()
-        except:
-            self.after(1000, self.show_frame)
+        )
+        self.imgtk = ImageTk.PhotoImage(image=self.img)
+        self.image_label.configure(image=self.imgtk)
+        # print("delay to show", time() - self.last_frame_time_generated_time)
+        self.tick_fps()
 
     def run_network_frame(
         self,
@@ -435,6 +462,7 @@ class Distorter(tk.Frame):
         adapt_movement_scale,
         generator,
     ):
+        # print("delay to consume resubmission", time() - self.last_frame_time_generated_time)
         driving_frame = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(
             0, 3, 1, 2
         )
@@ -456,6 +484,8 @@ class Distorter(tk.Frame):
         im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
         im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
 
+        # schedule the next frame ASAP
+        self.request_frame()
         return im
 
     def create_widgets(self):
@@ -465,7 +495,7 @@ class Distorter(tk.Frame):
         self.image_label.pack(side="left")
 
     def recalculate_initial_frame(self):
-        frame = self.get_prepped_frame()
+        frame = self.get_prepped_frame_for_ml()
         kp_driving_initial_future = executor.submit(
             oneshot_run_kp, self.kp_detector, frame
         )
@@ -473,9 +503,11 @@ class Distorter(tk.Frame):
 
     def tick_fps(self):
         now = time()
-        if self.fps_var is not None and self.last_frame is not None:
-            self.fps_var.set("fps: %01.01f" % (1 / (now - self.last_frame)))
-        self.last_frame = now
+        if self.fps_var is not None and self.last_frame_time is not None:
+            delta = now - self.last_frame_time
+            self.last_frame_interval_rolling_delta = self.last_frame_interval_rolling_delta * 0.3 + 0.7* delta
+            self.fps_var.set("fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta)))
+        self.last_frame_time = now
 
 def oneshot_run_kp(kp_detector, frame):
     source1 = torch.tensor(frame[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2)
@@ -620,7 +652,7 @@ def download_and_load_model(app):
     return load_model()
 
 model_needs_download_at_start = not os.path.exists(os.path.join('extract', 'vox-cpk.pth.tar'))
-executor = concurrent.futures.ThreadPoolExecutor()
+executor = concurrent.futures.ThreadPoolExecutor(3)
 
 root = tk.Tk()
 app = GetInputsApplication(master=root)

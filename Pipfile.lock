@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "63c4615db58f73b7d2320d121a85102477ef727ea332d9a9111eaa8ac24148b0"
+            "sha256": "11b9b190bf0bd4fb2b743038a9e1191e8a4eded6fe50c4e28a7118cdc084c59f"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -734,19 +734,17 @@
             ],
             "version": "==0.17"
         },
-        "future": {
+        "py-spy": {
             "hashes": [
-                "sha256:b1bead90b70cf6ec3f0710ae53a525360fa360d306a86583adc6bf83a4db537d"
+                "sha256:16d5a364b13c98666789de1335a2df5d9ef8bf8953b9f77d1b25ed3c4e006228",
+                "sha256:2199b9d5c4927243168465ae65dd5015ffcc607d027a03493b96a0bcf086adbc",
+                "sha256:23d9d63e5aefd5fed7eab0f48d615f22a67e1fe46f95ea7e66dde0ce603e0025",
+                "sha256:9250ab23c70e3d37eea5cbb8e54a2295ab506d7d4903ce5c350f6ae79e9015b8",
+                "sha256:989cdc65d22d99fd02e671f633d3f52d380dcc382090569bb2c74131c2ac5a8f",
+                "sha256:a186e94f0bbb5394d6a4223bfe2dffca652a29a29f3921104d25284586122223"
             ],
-            "markers": "python_version >= '2.6' and python_version not in '3.0, 3.1, 3.2, 3.3'",
-            "version": "==0.18.2"
-        },
-        "pefile": {
-            "hashes": [
-                "sha256:ed79b2353daa58421459abf4d685953bde0adf9f6e188944f97ba9795f100246"
-            ],
-            "markers": "sys_platform == 'win32'",
-            "version": "==2021.5.24"
+            "index": "pypi",
+            "version": "==0.3.7"
         },
         "pyinstaller": {
             "hashes": [
@@ -761,14 +759,6 @@
                 "sha256:892310e6363655838485ee748bf1c5e5cade7963686d9af8650ee218a3e0b031"
             ],
             "version": "==2021.1"
-        },
-        "pywin32-ctypes": {
-            "hashes": [
-                "sha256:24ffc3b341d457d48e8922352130cf2644024a4ff09762a2261fd34c36ee5942",
-                "sha256:9dc2d991b3479cc2df15930958b674a48a227d5361d413827a4cfd0b5876fc98"
-            ],
-            "markers": "sys_platform == 'win32'",
-            "version": "==0.2.0"
         }
     }
 }
