@@ -15,7 +15,7 @@ except:
 warnings.filterwarnings("ignore")
 
 from skimage.transform import resize
-from animate import normalize_kp
+from normalize_kp import normalize_kp
 from demo import load_checkpoints
 
 import tkinter as tk

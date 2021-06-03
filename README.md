@@ -23,7 +23,16 @@ pipenv run python ./app.py
 ## Building a Distributable
 
 ```sh
-pipenv install pyinstaller -d
+# get dependencies (including pyinstaller)
+pipenv install
+
+# Before proceeding, update the absolute paths in app.spec so they
+# are accurate on your machine.
+
+# package the app
 pipenv run pyinstaller --noconfirm app.spec
+# check it runs
 ./dist/first-order-motion-tk/app
+# build a distributable zip
+zip -r ./dist/first-order-motion-tk-linux.zip ./dist/first-order-motion-tk
 ```

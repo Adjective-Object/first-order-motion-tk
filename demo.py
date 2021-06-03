@@ -1,6 +1,4 @@
-import matplotlib
-matplotlib.use('Agg')
-import os, sys
+import sys  
 import yaml
 from argparse import ArgumentParser
 from tqdm import tqdm
@@ -14,7 +12,7 @@ from sync_batchnorm import DataParallelWithCallback
 
 from modules.generator import OcclusionAwareGenerator
 from modules.keypoint_detector import KPDetector
-from animate import normalize_kp
+from normalize_kp import normalize_kp
 from scipy.spatial import ConvexHull
 
 
