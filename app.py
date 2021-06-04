@@ -14,12 +14,10 @@ from time import time
 import webbrowser
 import multiprocessing.shared_memory as shared_memory
 import multiprocessing as mp
-import asyncio
 import traceback
 import faulthandler
 faulthandler.enable()
-import torch.backends.cudnn as cudnn
-cudnn.benchmark = True
+torch.backends.cudnn.benchmark = True
 
 try:
     from gdown import download as gdown_download
@@ -166,7 +164,7 @@ def get_initial_driving_img_name():
 
 # 256 x 256 array of 3 uint8s (RGB)
 # hack: double the size?
-DATA_SIZE = 256 * 256 * 3 * 2
+DATA_SIZE = 256 * 256 * 3
 class SharedData:
     shared_source: Union[shared_memory.SharedMemory, None] = None
     shared_source_arr: Union[np.ndarray, None] = None
@@ -242,7 +240,8 @@ class CUDARunRequest:
     Represents a request to run CUDA on an input frame
     """
 
-    def __init__(self, camera_frame_input_slot, network_output_slot):
+    def __init__(self, seq, camera_frame_input_slot, network_output_slot):
+        self.seq=seq
         self.camera_frame_input_slot = camera_frame_input_slot
         self.network_output_slot = network_output_slot
 
@@ -286,7 +285,12 @@ class CUDAWorkerPool:
 
         self._pool_size = pool_size
 
-        self.shared_data = SharedData(pool_size)
+        # allocate more shared_data slots than cuda pools.
+        # we want to process the next frame before the shared memory slot
+        # has been released, so keeping these slots open should allow
+        # the subprocesses to consume the next result after posting back results.
+        # without waiting on the consumer to read the data out and release the slot.
+        self.shared_data = SharedData(pool_size * 2)
         self.request_futures = dict()
 
     def step_loop(self):
@@ -337,13 +341,14 @@ class CUDAWorkerPool:
         initial_driving_img_shm_arr.arr[:,:,:] = new_driving_img
         self.broadcast_channel_parent.send(NotifyUpdatedDrivingImg())
 
-    def try_submit_job(self, driving_arr: np.ndarray):
+    def try_submit_job(self, seq: int, driving_arr: np.ndarray):
         io_slot = self.shared_data.try_get_available_in_out_pair()
         if io_slot is None:
             return io_slot
         in_slot, out_slot = io_slot
         # create the request and populate the driving array.
-        request = CUDARunRequest(in_slot, out_slot)
+        request = CUDARunRequest(seq, in_slot, out_slot)
+
         shared_shm_arr = request.get_input_as_shm_array()
         debug('writing request image to shared memory')
         shared_shm_arr.arr[:, :, :] = driving_arr[:, :, :]
@@ -792,6 +797,8 @@ def prep_image_for_ml(prepped_frame):
 class Distorter(tk.Frame):
     last_frame_time = None
     last_frame_interval_rolling_delta = 0
+    seq = 0
+    last_consumed_seq = 0
 
     def __init__(
         self,
@@ -832,8 +839,10 @@ class Distorter(tk.Frame):
         prepped_frame_arr = self.get_prepped_frame_arr()
         if prepped_frame_arr is not None:
             future = self.cuda_worker_pool.try_submit_job(
+                self.seq,
                 prepped_frame_arr
             )
+            self.seq += 1
             if future:
                 debug("waiting for job result")
                 future.add_done_callback(self.render_cuda_request_result)
@@ -848,19 +857,24 @@ class Distorter(tk.Frame):
 
     def render_cuda_request_result(self, cuda_request_future):
         cuda_request: CUDARunRequest = cuda_request_future.result()
-        debug("got result")
-        # Read the image from the shared memory
-        shm_array = cuda_request.get_output_as_shm_array()
-        self.img = Image.fromarray(
-            rgb2bgr(shm_array.arr)
-        )
-        self.imgtk = ImageTk.PhotoImage(image=self.img)
-        self.image_label.configure(image=self.imgtk)
+        if cuda_request.seq > self.last_consumed_seq:
+            self.last_consumed_seq = cuda_request.seq
+            debug("consuming result")
+            # Read the image from the shared memory
+            shm_array = cuda_request.get_output_as_shm_array()
+            self.img = Image.fromarray(
+                rgb2bgr(shm_array.arr)
+            )
+            self.imgtk = ImageTk.PhotoImage(image=self.img)
+            self.image_label.configure(image=self.imgtk)
+            # print("delay to show", time() - self.last_frame_time_generated_time)
+            self.tick_fps()
+        else:
+            debug("ignoring result due to out-of-order return")
         # Tell the worker pool that we've finished copying data out of the shared memory.
         # this releases the slot for future use
         self.cuda_worker_pool.release_request(cuda_request)
-        # print("delay to show", time() - self.last_frame_time_generated_time)
-        self.tick_fps()
+
 
     def create_widgets(self, initial_frame_img):
         self.img = initial_frame_img
@@ -1016,7 +1030,7 @@ executor = None
 def main():
     global SHARED_MEM_ID
     global executor
-    executor = ThreadPoolExecutor(3)
+    executor = ThreadPoolExecutor(2)
     SHARED_MEM_ID = os.getpid()
 
     debug("main process started")
