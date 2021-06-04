@@ -39,6 +39,9 @@ pipenv install --dev
 
 # package the app
 pipenv run pyinstaller --noconfirm app.spec
+# or package it on windows
+pipenv run pyinstaller --noconfirm app.win.spec
+
 # check it runs
 ./dist/first-order-motion-tk/app
 # build a distributable zip
