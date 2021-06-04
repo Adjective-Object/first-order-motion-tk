@@ -16,6 +16,7 @@ import multiprocessing.shared_memory as shared_memory
 import multiprocessing as mp
 import traceback
 import faulthandler
+
 faulthandler.enable()
 torch.backends.cudnn.benchmark = True
 
@@ -39,6 +40,8 @@ SHARED_MEM_ID = os.getppid()
 
 DEBUG = "-v" in argv or "--verbose" in argv
 header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
+
+
 def debug(*argv):
     if not DEBUG:
         return
@@ -51,6 +54,7 @@ debug(
     else "Found CUDA, the network will be run with hardware acceleration"
 )
 
+
 class DumbFutureLike:
     """
     Because the tkinter and asyncio event loops both want to live on the main thread,
@@ -60,8 +64,9 @@ class DumbFutureLike:
 
     This is kind of the worst of both worlds
     """
+
     def __init__(self):
-        self._callbacks=[]
+        self._callbacks = []
         self._complete = False
         self._result = None
 
@@ -71,7 +76,7 @@ class DumbFutureLike:
         while len(self._callbacks) != 0:
             cb = self._callbacks.pop()
             cb(self)
-    
+
     def add_done_callback(self, cb):
         if self._complete:
             cb(self)
@@ -83,6 +88,7 @@ class DumbFutureLike:
             raise Exception("blocked on result of incomplete DumbFutureLike")
         else:
             return self._result
+
 
 def bgr2rgb(arr):
     return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
@@ -134,6 +140,8 @@ def load_model(use_advanced=False):
 
 
 was_loaded = None
+
+
 def was_model_loaded_at_start():
     global was_loaded
     if was_loaded is None:
@@ -153,18 +161,24 @@ def download_and_load_model(app):
 def get_shared_input_name(i):
     return "shared_input_%s_%s" % (SHARED_MEM_ID, i)
 
+
 def get_shared_output_name(i):
     return "shared_output_%s_%s" % (SHARED_MEM_ID, i)
+
 
 def get_source_img_name():
     return "source_img_shared_%s" % SHARED_MEM_ID
 
+
 def get_initial_driving_img_name():
     return "initial_driving_img_shared_%s" % SHARED_MEM_ID
+
 
 # 256 x 256 array of 3 uint8s (RGB)
 # hack: double the size?
 DATA_SIZE = 256 * 256 * 3
+
+
 class SharedData:
     shared_source: Union[shared_memory.SharedMemory, None] = None
     shared_source_arr: Union[np.ndarray, None] = None
@@ -180,13 +194,19 @@ class SharedData:
         self._pool_slots = pool_slots
 
     def start(self):
-        self.shared_source = shared_memory.SharedMemory(name=get_source_img_name(), size=DATA_SIZE, create=True)
+        self.shared_source = shared_memory.SharedMemory(
+            name=get_source_img_name(), size=DATA_SIZE, create=True
+        )
         self.shared_source_arr = SHMArray(get_source_img_name())
-        self.shared_initial_driving = shared_memory.SharedMemory(name=get_initial_driving_img_name(), size=DATA_SIZE, create=True)
+        self.shared_initial_driving = shared_memory.SharedMemory(
+            name=get_initial_driving_img_name(), size=DATA_SIZE, create=True
+        )
         self.shared_initial_driving_arr = SHMArray(get_initial_driving_img_name())
 
         self.camera_frame_input_slots = [
-            shared_memory.SharedMemory(name=get_shared_input_name(i), size=DATA_SIZE, create=True)
+            shared_memory.SharedMemory(
+                name=get_shared_input_name(i), size=DATA_SIZE, create=True
+            )
             for i in range(self._pool_slots)
         ]
         self.open_inputs = list(range(self._pool_slots))
@@ -197,7 +217,6 @@ class SharedData:
             for i in range(self._pool_slots)
         ]
         self.open_outputs = list(range(self._pool_slots))
-
 
     def try_get_available_in_out_pair(self):
         if len(self.open_inputs) == 0 or len(self.open_outputs) == 0:
@@ -213,10 +232,10 @@ class SharedData:
         self.open_outputs.append(out_slot)
 
     def close(self):
-        if (self.shared_source):
+        if self.shared_source:
             self.shared_source.close()
             self.shared_source.unlink()
-        if (self.shared_initial_driving):
+        if self.shared_initial_driving:
             self.shared_initial_driving.close()
             self.shared_initial_driving.unlink()
         for frame in self.camera_frame_input_slots:
@@ -226,14 +245,19 @@ class SharedData:
             frame.close()
             frame.unlink()
 
+
 class SHMArray:
     """
     workaround for the face that shared memory is cleaned up as soon as it falls out of scope,
     even if it is referred to by other processes.
     """
+
     def __init__(self, shared_memory_name, create=False):
-        self.shared_mem = shared_memory.SharedMemory(name=shared_memory_name, size=DATA_SIZE, create=create)
+        self.shared_mem = shared_memory.SharedMemory(
+            name=shared_memory_name, size=DATA_SIZE, create=create
+        )
         self.arr = np.ndarray(shape=(256, 256, 3), dtype=np.uint8, buffer=self.shared_mem.buf)  # type: ignore
+
 
 class CUDARunRequest:
     """
@@ -241,7 +265,7 @@ class CUDARunRequest:
     """
 
     def __init__(self, seq, camera_frame_input_slot, network_output_slot):
-        self.seq=seq
+        self.seq = seq
         self.camera_frame_input_slot = camera_frame_input_slot
         self.network_output_slot = network_output_slot
 
@@ -312,7 +336,6 @@ class CUDAWorkerPool:
                     ]
                     future.set_result(child_message)
 
-
     def release_request(self, child_message: CUDARunRequest):
         io_pair = (
             child_message.camera_frame_input_slot,
@@ -320,7 +343,10 @@ class CUDAWorkerPool:
         )
         del self.request_futures[io_pair]
         self.shared_data.release_in_out_pair(*io_pair)
-        debug("releasing request. Available slot counts: (%s,%s)" % (len(self.shared_data.open_inputs), len(self.shared_data.open_outputs)))
+        debug(
+            "releasing request. Available slot counts: (%s,%s)"
+            % (len(self.shared_data.open_inputs), len(self.shared_data.open_outputs))
+        )
 
     def update_settings(
         self,
@@ -329,16 +355,18 @@ class CUDAWorkerPool:
         adapt_movement_scale=True,
     ):
         debug("host update_settings")
-        self.broadcast_channel_parent.send(NotifyUpdatedSettings(
-            use_relative_movement=use_relative_movement,
-            use_relative_jacobian=use_relative_jacobian,
-            adapt_movement_scale=adapt_movement_scale,
-        ))
+        self.broadcast_channel_parent.send(
+            NotifyUpdatedSettings(
+                use_relative_movement=use_relative_movement,
+                use_relative_jacobian=use_relative_jacobian,
+                adapt_movement_scale=adapt_movement_scale,
+            )
+        )
 
     def update_initial_driving_img(self, new_driving_img):
         debug("host update initial_driving_img")
         initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
-        initial_driving_img_shm_arr.arr[:,:,:] = new_driving_img
+        initial_driving_img_shm_arr.arr[:, :, :] = new_driving_img
         self.broadcast_channel_parent.send(NotifyUpdatedDrivingImg())
 
     def try_submit_job(self, seq: int, driving_arr: np.ndarray):
@@ -350,7 +378,7 @@ class CUDAWorkerPool:
         request = CUDARunRequest(seq, in_slot, out_slot)
 
         shared_shm_arr = request.get_input_as_shm_array()
-        debug('writing request image to shared memory')
+        debug("writing request image to shared memory")
         shared_shm_arr.arr[:, :, :] = driving_arr[:, :, :]
         self.parent_to_child_message_queue.put(request)
         # create a future, fulfill that future later.
@@ -361,23 +389,29 @@ class CUDAWorkerPool:
     def start(self, source_arr, initial_driving_img_arr):
         self.shared_data.start()
 
-        self.shared_data.shared_initial_driving_arr.arr[:,:,:] = initial_driving_img_arr
-        self.shared_data.shared_source_arr.arr[:,:,:] = source_arr
+        self.shared_data.shared_initial_driving_arr.arr[
+            :, :, :
+        ] = initial_driving_img_arr
+        self.shared_data.shared_source_arr.arr[:, :, :] = source_arr
 
         self.broadcast_channel_parent, self.broadcast_channel_child = self.ctx.Pipe()
 
         self.processes = [
-            self.ctx.Process(group=None, target=process_worker_entrypoint, args=(
-                self.parent_to_child_message_queue,
-                self.child_to_parent_message_queue,
-                self.broadcast_channel_child
-            ))
+            self.ctx.Process(
+                group=None,
+                target=process_worker_entrypoint,
+                args=(
+                    self.parent_to_child_message_queue,
+                    self.child_to_parent_message_queue,
+                    self.broadcast_channel_child,
+                ),
+            )
             for _ in range(self._pool_size)
         ]
 
         for process in self.processes:
             process.start()
-            
+
     def close(self):
         for process in self.processes:
             debug("killing worker process", process.pid)
@@ -387,33 +421,31 @@ class CUDAWorkerPool:
                 process.join()
             process.close()
         self.shared_data.close()
-    
+
     def entry_context(self, source_arr, initial_driving_img_arr):
         return CUDAWorkerPoolContext(self, source_arr, initial_driving_img_arr)
+
 
 class CUDAWorkerPoolContext:
     def __init__(self, worker_pool, source_arr, initial_driving_img_arr):
         self.worker_pool = worker_pool
         self.source_arr = source_arr
         self.initial_driving_img_arr = initial_driving_img_arr
-    
+
     def __enter__(self):
-        self.worker_pool.start(
-            self.source_arr,
-            self.initial_driving_img_arr
-        )
+        self.worker_pool.start(self.source_arr, self.initial_driving_img_arr)
 
     def __exit__(self, extype, exvalue, tb):
         self.worker_pool.close()
 
+
 def img_to_tensor(img_arr) -> torch.Tensor:
-    tensor = torch.tensor(img_arr[np.newaxis].astype(np.float32)).permute(
-        0, 3, 1, 2
-    )
+    tensor = torch.tensor(img_arr[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2)
     if not USE_CPU:
         return tensor.cuda()
     else:
         return tensor
+
 
 def process_worker_entrypoint(
     parent_to_child_message_queue: mp.Queue,
@@ -434,7 +466,9 @@ def process_worker_entrypoint(
     del source_shm_arr
 
     initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
-    initial_driving_img_tensor = img_to_tensor(prep_image_for_ml(initial_driving_img_shm_arr.arr))
+    initial_driving_img_tensor = img_to_tensor(
+        prep_image_for_ml(initial_driving_img_shm_arr.arr)
+    )
     kp_driving_initial = kp_detector(initial_driving_img_tensor)
     del initial_driving_img_shm_arr
 
@@ -455,14 +489,14 @@ def process_worker_entrypoint(
                     parent_process_request = broadcast_channel_child.recv()
                 else:
                     try:
-                        parent_process_request = parent_to_child_message_queue.get_nowait()
+                        parent_process_request = (
+                            parent_to_child_message_queue.get_nowait()
+                        )
                         debug("read from event queue ")
                     except Empty:
                         pass
 
-            debug(
-                "child process got message", parent_process_request
-            )
+            debug("child process got message", parent_process_request)
 
             if isinstance(parent_process_request, NotifyUpdatedSettings):
                 use_relative_movement = parent_process_request.use_relative_movement
@@ -470,7 +504,9 @@ def process_worker_entrypoint(
                 adapt_movement_scale = parent_process_request.adapt_movement_scale
             elif isinstance(parent_process_request, NotifyUpdatedDrivingImg):
                 initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
-                initial_driving_img_tensor = img_to_tensor(prep_image_for_ml(initial_driving_img_shm_arr.arr))
+                initial_driving_img_tensor = img_to_tensor(
+                    prep_image_for_ml(initial_driving_img_shm_arr.arr)
+                )
                 kp_driving_initial = kp_detector(initial_driving_img_tensor)
                 del initial_driving_img_shm_arr
             elif isinstance(parent_process_request, CUDARunRequest):
@@ -478,7 +514,9 @@ def process_worker_entrypoint(
 
                 # TODO: update driving frame tensor's data array instead of reinitializing on each run?
                 # could this be the source of the memory issues?
-                driving_frame_tensor = img_to_tensor(prep_image_for_ml(driving_frame_shm_arr.arr))
+                driving_frame_tensor = img_to_tensor(
+                    prep_image_for_ml(driving_frame_shm_arr.arr)
+                )
 
                 kp_driving = kp_detector(driving_frame_tensor)
                 kp_norm = normalize_kp(
@@ -487,7 +525,7 @@ def process_worker_entrypoint(
                     kp_driving_initial=kp_driving_initial,
                     use_relative_movement=use_relative_movement,
                     use_relative_jacobian=use_relative_jacobian,
-                    adapt_movement_scale=adapt_movement_scale
+                    adapt_movement_scale=adapt_movement_scale,
                 )
 
                 out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
@@ -511,6 +549,8 @@ def process_worker_entrypoint(
 
 
 VIDEO_DISPLAY_FRAME_DELAY = int(1000 / 24)
+
+
 class VideoDisplay(tk.Widget):
     frame_needs_update = False
 
@@ -681,7 +721,9 @@ class GetInputsApplication(tk.Frame):
         self.steal_button = tk.Button(self)
         self.steal_button["command"] = self.run_stolen_face
 
-        self.loading_label = tk.Label(self, fg="green" if was_model_loaded_at_start() else "red" )
+        self.loading_label = tk.Label(
+            self, fg="green" if was_model_loaded_at_start() else "red"
+        )
         self.loading_label["text"] = (
             "Model downloaded"
             if was_model_loaded_at_start()
@@ -783,20 +825,23 @@ class GetInputsApplication(tk.Frame):
             and self.video_capture.video_display.cap is not None
             and self.video_capture.video_display.cap.isOpened()
         ):
-            self.on_load_complete(
-                self.img,
-                self.video_capture.video_display.cap
-            )
+            self.on_load_complete(self.img, self.video_capture.video_display.cap)
             self.quit()
 
 
-ML_FRAME_INTERVAL = 1000//24
+ML_FRAME_INTERVAL = 1000 // 24
+
+
 def prep_image_for_ml(prepped_frame):
     return np.array(prepped_frame)[:, :, :3] / 255
 
+
+FPS_COUNTER_FALLOFF_RATIO = 0.018
+
+
 class Distorter(tk.Frame):
     last_frame_time = None
-    last_frame_interval_rolling_delta = 0
+    last_frame_interval_rolling_delta = None
     seq = 0
     last_consumed_seq = 0
 
@@ -806,7 +851,7 @@ class Distorter(tk.Frame):
         initial_frame_img: Image,
         cuda_worker_pool: CUDAWorkerPool,
         video_capture: VideoCapture,
-        zoom_factor_var = None,
+        zoom_factor_var=None,
         fps_var=None,
     ):
         tk.Frame.__init__(self, parent)
@@ -814,7 +859,6 @@ class Distorter(tk.Frame):
         self.video_capture = video_capture
         self.fps_var = fps_var
         self.zoom_factor_var = zoom_factor_var
-        self.tick_fps()
 
         self.after(ML_FRAME_INTERVAL, self.request_frame)
 
@@ -827,21 +871,17 @@ class Distorter(tk.Frame):
             return np.array(
                 prep_frame(
                     video_frame,
-                    self.zoom_factor_var.get() if self.zoom_factor_var else 0.8
+                    self.zoom_factor_var.get() if self.zoom_factor_var else 0.8,
                 ),
-                dtype=np.uint8
+                dtype=np.uint8,
             )
         else:
             return None
 
-
     def request_frame(self):
         prepped_frame_arr = self.get_prepped_frame_arr()
         if prepped_frame_arr is not None:
-            future = self.cuda_worker_pool.try_submit_job(
-                self.seq,
-                prepped_frame_arr
-            )
+            future = self.cuda_worker_pool.try_submit_job(self.seq, prepped_frame_arr)
             self.seq += 1
             if future:
                 debug("waiting for job result")
@@ -862,9 +902,7 @@ class Distorter(tk.Frame):
             debug("consuming result")
             # Read the image from the shared memory
             shm_array = cuda_request.get_output_as_shm_array()
-            self.img = Image.fromarray(
-                rgb2bgr(shm_array.arr)
-            )
+            self.img = Image.fromarray(rgb2bgr(shm_array.arr))
             self.imgtk = ImageTk.PhotoImage(image=self.img)
             self.image_label.configure(image=self.imgtk)
             # print("delay to show", time() - self.last_frame_time_generated_time)
@@ -874,7 +912,6 @@ class Distorter(tk.Frame):
         # Tell the worker pool that we've finished copying data out of the shared memory.
         # this releases the slot for future use
         self.cuda_worker_pool.release_request(cuda_request)
-
 
     def create_widgets(self, initial_frame_img):
         self.img = initial_frame_img
@@ -895,9 +932,14 @@ class Distorter(tk.Frame):
         now = time()
         if self.fps_var is not None and self.last_frame_time is not None:
             delta = now - self.last_frame_time
-            self.last_frame_interval_rolling_delta = (
-                self.last_frame_interval_rolling_delta * 0.3 + 0.7 * delta
-            )
+            if self.last_frame_interval_rolling_delta == None:
+                self.last_frame_interval_rolling_delta = delta
+            else:
+                self.last_frame_interval_rolling_delta = (
+                    self.last_frame_interval_rolling_delta
+                    * (1 - FPS_COUNTER_FALLOFF_RATIO)
+                    + (FPS_COUNTER_FALLOFF_RATIO * delta)
+                )
             self.fps_var.set(
                 "fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta))
             )
@@ -913,20 +955,26 @@ def oneshot_run_kp(kp_detector, frame):
 
 
 CUDA_MAIN_LOOP_TICK_DELAY = 1
+
+
 class RunSimulationApplication(tk.Frame):
     def __init__(
-        self, initial_frame_img: Image, video_capture: VideoCapture, cuda_worker_pool: CUDAWorkerPool, master=None
+        self,
+        initial_frame_img: Image,
+        video_capture: VideoCapture,
+        cuda_worker_pool: CUDAWorkerPool,
+        master=None,
     ):
         super().__init__(master)
         self.video_capture = video_capture
         self.cuda_worker_pool = cuda_worker_pool
 
         self.use_relative_movement_var = tk.BooleanVar(self, True)
-        self.use_relative_movement_var.trace('w', self.on_settings_var_updated)
+        self.use_relative_movement_var.trace("w", self.on_settings_var_updated)
         self.use_relative_jacobian_var = tk.BooleanVar(self, True)
-        self.use_relative_jacobian_var.trace('w', self.on_settings_var_updated)
+        self.use_relative_jacobian_var.trace("w", self.on_settings_var_updated)
         self.adapt_movement_scale_var = tk.BooleanVar(self, True)
-        self.adapt_movement_scale_var.trace('w', self.on_settings_var_updated)
+        self.adapt_movement_scale_var.trace("w", self.on_settings_var_updated)
 
         self.zoom_factor_var = tk.DoubleVar(self, 0.8)
         self.fps_var = tk.StringVar(self, "fps: ")
@@ -934,9 +982,9 @@ class RunSimulationApplication(tk.Frame):
         self.master = master
         self.pack()
         self.create_widgets(initial_frame_img)
-        
+
         self.after(CUDA_MAIN_LOOP_TICK_DELAY, self.step_cuda_worker_pool_main_loop)
-    
+
     def on_settings_var_updated(self, *argv):
         self.cuda_worker_pool.update_settings(
             use_relative_movement=self.use_relative_movement_var.get(),
@@ -1027,6 +1075,7 @@ class RunSimulationApplication(tk.Frame):
 
 executor = None
 
+
 def main():
     global SHARED_MEM_ID
     global executor
@@ -1038,10 +1087,12 @@ def main():
     root = tk.Tk()
     param_source_img = None
     param_video_cap = None
+
     def set_inputs(source_img, video_cap):
         nonlocal param_source_img, param_video_cap
         param_source_img = source_img
         param_video_cap = video_cap
+
     get_inputs_app = GetInputsApplication(master=root, on_load_complete=set_inputs)
 
     cuda_worker_pool = CUDAWorkerPool(1)
@@ -1050,16 +1101,16 @@ def main():
     get_inputs_app.destroy()
 
     if param_source_img is None or param_video_cap is None:
-        raise Exception("failed to initialize? source_img=%s, param_video_cap=%s" % (
-            param_source_img,
-            param_video_cap
-        ))
+        raise Exception(
+            "failed to initialize? source_img=%s, param_video_cap=%s"
+            % (param_source_img, param_video_cap)
+        )
 
     source_img_arr = np.array(param_source_img, dtype=np.uint8)
     for i in range(10):
         ret, frame = param_video_cap.read()
         if frame is None:
-            print ("failed to get frame from video source. Trying again.")
+            print("failed to get frame from video source. Trying again.")
             time.sleep(0.1)
         else:
             break
@@ -1067,16 +1118,13 @@ def main():
         raise Exception("could not get an initial frame from video source. crashing.")
 
     initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
-    with cuda_worker_pool.entry_context(
-        source_img_arr, 
-        initial_image_arr
-    ):
+    with cuda_worker_pool.entry_context(source_img_arr, initial_image_arr):
         print("entering worker pool")
         app2 = RunSimulationApplication(
             initial_frame_img=param_source_img,
             video_capture=param_video_cap,
-            cuda_worker_pool=cuda_worker_pool, 
-            master=root
+            cuda_worker_pool=cuda_worker_pool,
+            master=root,
         )
         app2.mainloop()
         root.destroy()
