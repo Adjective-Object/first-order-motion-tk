@@ -1,7 +1,7 @@
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import pool
 import os.path
-from sys import exit
+from sys import exit, argv
 from queue import Empty
 from typing import List, Union
 import cv2
@@ -18,6 +18,8 @@ import asyncio
 import traceback
 import faulthandler
 faulthandler.enable()
+import torch.backends.cudnn as cudnn
+cudnn.benchmark = True
 
 try:
     from gdown import download as gdown_download
@@ -37,11 +39,52 @@ USE_CPU = not torch.cuda.is_available()
 INSTALLDIR = os.path.dirname(__file__)
 SHARED_MEM_ID = os.getppid()
 
-print(
-    "(%s) WARNING: CUDA not available, falling back to CPU. THIS WILL BE HORRIBLY SLOW" % os.getpid()
+DEBUG = "-v" in argv or "--verbose" in argv
+header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
+def debug(*argv):
+    if not DEBUG:
+        return
+    print(header, *argv)
+
+
+debug(
+    "WARNING: CUDA not available, falling back to CPU. THIS WILL BE HORRIBLY SLOW"
     if USE_CPU
-    else "(%s) Found CUDA, the network will be run with hardware acceleration" % os.getpid()
+    else "Found CUDA, the network will be run with hardware acceleration"
 )
+
+class DumbFutureLike:
+    """
+    Because the tkinter and asyncio event loops both want to live on the main thread,
+    and because I don't want to restructure the app to use callbacks to switch between the active app,
+    I'm adding this callback-container object to maintain future-like semantics and callback registration
+    without actually getting the benefit of async/await syntax.
+
+    This is kind of the worst of both worlds
+    """
+    def __init__(self):
+        self._callbacks=[]
+        self._complete = False
+        self._result = None
+
+    def set_result(self, result):
+        self._result = result
+        self._complete = True
+        while len(self._callbacks) != 0:
+            cb = self._callbacks.pop()
+            cb(self)
+    
+    def add_done_callback(self, cb):
+        if self._complete:
+            cb(self)
+        else:
+            self._callbacks.append(cb)
+
+    def result(self):
+        if not self._complete:
+            raise Exception("blocked on result of incomplete DumbFutureLike")
+        else:
+            return self._result
 
 def bgr2rgb(arr):
     return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
@@ -102,7 +145,7 @@ def was_model_loaded_at_start():
 
 def download_and_load_model(app):
     if not was_model_loaded_at_start():
-        print("downloading model")
+        debug("downloading model")
         download_model()
         app.download_complete()
     # print("loading model")
@@ -168,8 +211,8 @@ class SharedData:
         return (in_slot, out_slot)
 
     def release_in_out_pair(self, in_slot, out_slot):
-        self.open_inputs.push(in_slot)
-        self.open_outputs.push(out_slot)
+        self.open_inputs.append(in_slot)
+        self.open_outputs.append(out_slot)
 
     def close(self):
         if (self.shared_source):
@@ -222,9 +265,9 @@ class NotifyUpdatedSettings:
         use_relative_jacobian=True,
         adapt_movement_scale=True,
     ):
-        use_relative_movement
-        use_relative_jacobian
-        adapt_movement_scale
+        self.use_relative_movement = use_relative_movement
+        self.use_relative_jacobian = use_relative_jacobian
+        self.adapt_movement_scale = adapt_movement_scale
 
 
 class NotifyChildProcessCrashed:
@@ -247,23 +290,24 @@ class CUDAWorkerPool:
         self.request_futures = dict()
 
     def step_loop(self):
-        # print('[%s] stepping event loop' % os.getpid())
-        for process in self.processes:
-            if not self.child_to_parent_message_queue.empty():
-                child_message = self.child_to_parent_message_queue.get_nowait()
-                if child_message is not None:
-                    if isinstance(child_message, NotifyChildProcessCrashed):
-                        print("[%s] child process got exception?" % os.getpid())
-                    elif isinstance(child_message, CUDARunRequest):
-                        print("[%s] got CUDA run result!" % os.getpid())
-                        future = self.request_futures[
-                            (
-                                child_message.camera_frame_input_slot,
-                                child_message.network_output_slot,
-                            )
-                        ]
-                        future.set_result(child_message)
-                    
+        # debug('stepping event loop')
+        if not self.child_to_parent_message_queue.empty():
+            child_message = self.child_to_parent_message_queue.get_nowait()
+
+            if child_message is not None:
+                if isinstance(child_message, NotifyChildProcessCrashed):
+                    debug("parent was notified of child process exception")
+                    pass
+                elif isinstance(child_message, CUDARunRequest):
+                    debug("parent received network run result!")
+                    future = self.request_futures[
+                        (
+                            child_message.camera_frame_input_slot,
+                            child_message.network_output_slot,
+                        )
+                    ]
+                    future.set_result(child_message)
+
 
     def release_request(self, child_message: CUDARunRequest):
         io_pair = (
@@ -272,7 +316,7 @@ class CUDAWorkerPool:
         )
         del self.request_futures[io_pair]
         self.shared_data.release_in_out_pair(*io_pair)
-        print("[%s] releasing request. Available slot counts: (%s,%s)" % (len(self.shared_data.open_inputs), len(self.shared_data.open_outputs)))
+        debug("releasing request. Available slot counts: (%s,%s)" % (len(self.shared_data.open_inputs), len(self.shared_data.open_outputs)))
 
     def update_settings(
         self,
@@ -280,16 +324,18 @@ class CUDAWorkerPool:
         use_relative_jacobian=True,
         adapt_movement_scale=True,
     ):
-        self.broadcast_channel_child.send(NotifyUpdatedSettings(
+        debug("host update_settings")
+        self.broadcast_channel_parent.send(NotifyUpdatedSettings(
             use_relative_movement=use_relative_movement,
             use_relative_jacobian=use_relative_jacobian,
             adapt_movement_scale=adapt_movement_scale,
         ))
 
-    def update_driving_img(self, new_driving_img):
+    def update_initial_driving_img(self, new_driving_img):
+        debug("host update initial_driving_img")
         initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
-        initial_driving_img.arr[:,:,:] = new_driving_img
-        self.broadcast_channel_child.send(NotifyUpdatedDrivingImg())
+        initial_driving_img_shm_arr.arr[:,:,:] = new_driving_img
+        self.broadcast_channel_parent.send(NotifyUpdatedDrivingImg())
 
     def try_submit_job(self, driving_arr: np.ndarray):
         io_slot = self.shared_data.try_get_available_in_out_pair()
@@ -299,13 +345,13 @@ class CUDAWorkerPool:
         # create the request and populate the driving array.
         request = CUDARunRequest(in_slot, out_slot)
         shared_shm_arr = request.get_input_as_shm_array()
-        print('[%s] writing request image to shared memory' % os.getpid())
-        print(shared_shm_arr)
+        debug('writing request image to shared memory')
         shared_shm_arr.arr[:, :, :] = driving_arr[:, :, :]
         self.parent_to_child_message_queue.put(request)
         # create a future, fulfill that future later.
-        future = asyncio.get_event_loop().create_future()
+        future = DumbFutureLike()
         self.request_futures[io_slot] = future
+        return future
 
     def start(self, source_arr, initial_driving_img_arr):
         self.shared_data.start()
@@ -313,10 +359,13 @@ class CUDAWorkerPool:
         self.shared_data.shared_initial_driving_arr.arr[:,:,:] = initial_driving_img_arr
         self.shared_data.shared_source_arr.arr[:,:,:] = source_arr
 
+        self.broadcast_channel_parent, self.broadcast_channel_child = self.ctx.Pipe()
+
         self.processes = [
             self.ctx.Process(group=None, target=process_worker_entrypoint, args=(
                 self.parent_to_child_message_queue,
                 self.child_to_parent_message_queue,
+                self.broadcast_channel_child
             ))
             for _ in range(self._pool_size)
         ]
@@ -324,11 +373,13 @@ class CUDAWorkerPool:
         for process in self.processes:
             process.start()
             
-        self.broadcast_channel_parent, self.broadcast_channel_child = self.ctx.Pipe()
-
     def close(self):
         for process in self.processes:
+            debug("killing worker process", process.pid)
             process.terminate()
+            if process.is_alive:
+                debug("process survied termination, joining", process.pid)
+                process.join()
             process.close()
         self.shared_data.close()
     
@@ -362,31 +413,31 @@ def img_to_tensor(img_arr) -> torch.Tensor:
 def process_worker_entrypoint(
     parent_to_child_message_queue: mp.Queue,
     child_to_parent_message_queue: mp.Queue,
+    broadcast_channel_child,
 ):
-    print("(%s) worker starting up" % os.getpid())
-    broadcast_channel_parent, _ = mp.Pipe()
+    debug("worker starting up")
 
     # load the model before we start listening for requests
-    print("(%s) worker loading model" % os.getpid())
+    debug("worker loading model")
     generator, kp_detector = load_model()
 
-    print("(%s) worker initializing tensors" % os.getpid())
+    debug("worker initializing tensors")
+
     source_shm_arr = SHMArray(get_source_img_name())
-    initial_driving_img = SHMArray(get_initial_driving_img_name())
-    # copy out of shared memory
-    source_copy_arr = np.array(source_shm_arr.arr)
-
-    source_tensor = img_to_tensor(source_copy_arr)
+    source_tensor = img_to_tensor(prep_image_for_ml(source_shm_arr.arr))
     kp_source = kp_detector(source_tensor)
+    del source_shm_arr
 
-    initial_driving_img_tensor = img_to_tensor(source_copy_arr)
+    initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
+    initial_driving_img_tensor = img_to_tensor(prep_image_for_ml(initial_driving_img_shm_arr.arr))
     kp_driving_initial = kp_detector(initial_driving_img_tensor)
+    del initial_driving_img_shm_arr
 
     use_relative_movement = True
     use_relative_jacobian = True
     adapt_movement_scale = True
 
-    print("(%s) worker entering mainloop" % os.getpid())
+    debug("worker entering mainloop")
 
     try:
         while True:
@@ -394,18 +445,18 @@ def process_worker_entrypoint(
                 CUDARunRequest, NotifyUpdatedDrivingImg, NotifyUpdatedSettings, None
             ] = None
             while parent_process_request is None:
-                if broadcast_channel_parent.poll():
-                    print("(%s) read from parent pipe" % os.getpid())
-                    parent_process_request = broadcast_channel_parent.recv()
+                if broadcast_channel_child.poll():
+                    debug("read from parent pipe")
+                    parent_process_request = broadcast_channel_child.recv()
                 else:
                     try:
                         parent_process_request = parent_to_child_message_queue.get_nowait()
-                        print("(%s) read from event queue" % os.getpid())
+                        debug("read from event queue ")
                     except Empty:
                         pass
 
-            print(
-                "child process", os.getpid(), "got message", parent_process_request
+            debug(
+                "child process got message", parent_process_request
             )
 
             if isinstance(parent_process_request, NotifyUpdatedSettings):
@@ -413,12 +464,16 @@ def process_worker_entrypoint(
                 use_relative_jacobian = parent_process_request.use_relative_jacobian
                 adapt_movement_scale = parent_process_request.adapt_movement_scale
             elif isinstance(parent_process_request, NotifyUpdatedDrivingImg):
-                kp_driving_initial = kp_detector(initial_driving_img)
+                initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
+                initial_driving_img_tensor = img_to_tensor(prep_image_for_ml(initial_driving_img_shm_arr.arr))
+                kp_driving_initial = kp_detector(initial_driving_img_tensor)
+                del initial_driving_img_shm_arr
             elif isinstance(parent_process_request, CUDARunRequest):
                 driving_frame_shm_arr = parent_process_request.get_input_as_shm_array()
 
                 # TODO: update driving frame tensor's data array instead of reinitializing on each run?
-                driving_frame_tensor = img_to_tensor(driving_frame_shm_arr.arr)
+                # could this be the source of the memory issues?
+                driving_frame_tensor = img_to_tensor(prep_image_for_ml(driving_frame_shm_arr.arr))
 
                 kp_driving = kp_detector(driving_frame_tensor)
                 kp_norm = normalize_kp(
@@ -427,14 +482,16 @@ def process_worker_entrypoint(
                     kp_driving_initial=kp_driving_initial,
                     use_relative_movement=use_relative_movement,
                     use_relative_jacobian=use_relative_jacobian,
-                    adapt_movement_scale=adapt_movement_scale,
+                    adapt_movement_scale=adapt_movement_scale
                 )
 
                 out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
                 im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
                 im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
                 output_shm_arr = parent_process_request.get_output_as_shm_array()
-                output_shm_arr.arr[:, :, :] = im
+                output_shm_arr.arr[:, :, :] = np.array(im * 255, dtype=np.uint8)
+
+                debug("worker process posting result back to parent")
 
                 # send the request back to say the network has been completed and written
                 # to the corresponding shared memory.
@@ -442,7 +499,7 @@ def process_worker_entrypoint(
             else:
                 raise Exception("Received unknown request")
     except:
-        print("(%s) worker process encountered exception" % (os.getpid()))
+        debug("worker process encountered exception")
         traceback.print_exc()
         child_to_parent_message_queue.put(NotifyChildProcessCrashed())
         exit(1)
@@ -728,7 +785,7 @@ class GetInputsApplication(tk.Frame):
             self.quit()
 
 
-ML_FRAME_INTERVAL = 1000//30
+ML_FRAME_INTERVAL = 1000//24
 def prep_image_for_ml(prepped_frame):
     return np.array(prepped_frame)[:, :, :3] / 255
 
@@ -742,12 +799,14 @@ class Distorter(tk.Frame):
         initial_frame_img: Image,
         cuda_worker_pool: CUDAWorkerPool,
         video_capture: VideoCapture,
+        zoom_factor_var = None,
         fps_var=None,
     ):
         tk.Frame.__init__(self, parent)
         self.cuda_worker_pool = cuda_worker_pool
         self.video_capture = video_capture
         self.fps_var = fps_var
+        self.zoom_factor_var = zoom_factor_var
         self.tick_fps()
 
         self.after(ML_FRAME_INTERVAL, self.request_frame)
@@ -755,27 +814,41 @@ class Distorter(tk.Frame):
         # generate widgets
         self.create_widgets(initial_frame_img)
 
-    def request_frame(self):
+    def get_prepped_frame_arr(self):
         ret, video_frame = self.video_capture.read()
         if video_frame is not None:
-            print("[%s] submitting cuda job" % os.getpid())
+            return np.array(
+                prep_frame(
+                    video_frame,
+                    self.zoom_factor_var.get() if self.zoom_factor_var else 0.8
+                ),
+                dtype=np.uint8
+            )
+        else:
+            return None
+
+
+    def request_frame(self):
+        prepped_frame_arr = self.get_prepped_frame_arr()
+        if prepped_frame_arr is not None:
             future = self.cuda_worker_pool.try_submit_job(
-                prep_image_for_ml(
-                    prep_frame(
-                        video_frame
-                    )
-                )
+                prepped_frame_arr
             )
             if future:
-                print("[%s] waiting for job result" % os.getpid())
+                debug("waiting for job result")
                 future.add_done_callback(self.render_cuda_request_result)
             else:
-                print("[%s] did not submit frame to worker pool: no available workers" % os.getpid())
+                debug("did not submit frame to worker pool: no available workers")
+                pass
         else:
-            print("[%s] failed to get frame from video source" % os.getpid())
+            debug("failed to get frame from video source")
+            pass
 
-    def render_cuda_request_result(self, cuda_request: CUDARunRequest):
-        print("[%s] got result" % os.getpid())
+        self.after(ML_FRAME_INTERVAL, self.request_frame)
+
+    def render_cuda_request_result(self, cuda_request_future):
+        cuda_request: CUDARunRequest = cuda_request_future.result()
+        debug("got result")
         # Read the image from the shared memory
         shm_array = cuda_request.get_output_as_shm_array()
         self.img = Image.fromarray(
@@ -797,11 +870,12 @@ class Distorter(tk.Frame):
         self.image_label.pack(side="left")
 
     def recalculate_initial_frame(self):
-        frame = self.get_prepped_frame_for_ml()
-        kp_driving_initial_future = executor.submit(
-            oneshot_run_kp, self.kp_detector, frame
-        )
-        kp_driving_initial_future.add_done_callback(self.set_kp_driving_initial)
+        prepped_frame_arr = self.get_prepped_frame_arr()
+        if prepped_frame_arr is not None:
+            self.cuda_worker_pool.update_initial_driving_img(prepped_frame_arr)
+            debug("requested update to driving img")
+        else:
+            debug("failed to get frame to update the initial driving frame")
 
     def tick_fps(self):
         now = time()
@@ -824,7 +898,7 @@ def oneshot_run_kp(kp_detector, frame):
     return kp_detector(source1)
 
 
-CUDA_MAIN_LOOP_TICK_DELAY = 5
+CUDA_MAIN_LOOP_TICK_DELAY = 1
 class RunSimulationApplication(tk.Frame):
     def __init__(
         self, initial_frame_img: Image, video_capture: VideoCapture, cuda_worker_pool: CUDAWorkerPool, master=None
@@ -834,8 +908,12 @@ class RunSimulationApplication(tk.Frame):
         self.cuda_worker_pool = cuda_worker_pool
 
         self.use_relative_movement_var = tk.BooleanVar(self, True)
+        self.use_relative_movement_var.trace('w', self.on_settings_var_updated)
         self.use_relative_jacobian_var = tk.BooleanVar(self, True)
+        self.use_relative_jacobian_var.trace('w', self.on_settings_var_updated)
         self.adapt_movement_scale_var = tk.BooleanVar(self, True)
+        self.adapt_movement_scale_var.trace('w', self.on_settings_var_updated)
+
         self.zoom_factor_var = tk.DoubleVar(self, 0.8)
         self.fps_var = tk.StringVar(self, "fps: ")
 
@@ -845,6 +923,13 @@ class RunSimulationApplication(tk.Frame):
         
         self.after(CUDA_MAIN_LOOP_TICK_DELAY, self.step_cuda_worker_pool_main_loop)
     
+    def on_settings_var_updated(self, *argv):
+        self.cuda_worker_pool.update_settings(
+            use_relative_movement=self.use_relative_movement_var.get(),
+            use_relative_jacobian=self.use_relative_jacobian_var.get(),
+            adapt_movement_scale=self.adapt_movement_scale_var.get(),
+        )
+
     def step_cuda_worker_pool_main_loop(self):
         self.cuda_worker_pool.step_loop()
         self.after(CUDA_MAIN_LOOP_TICK_DELAY, self.step_cuda_worker_pool_main_loop)
@@ -858,6 +943,7 @@ class RunSimulationApplication(tk.Frame):
             video_capture=self.video_capture,
             cuda_worker_pool=self.cuda_worker_pool,
             fps_var=self.fps_var,
+            zoom_factor_var=self.zoom_factor_var,
         )
         self.distorter.pack(side="left")
         self.video_display = VideoDisplay(
@@ -933,7 +1019,7 @@ def main():
     executor = ThreadPoolExecutor(3)
     SHARED_MEM_ID = os.getpid()
 
-    print("[%s] main process started" % os.getpid())
+    debug("main process started")
 
     root = tk.Tk()
     param_source_img = None
@@ -943,8 +1029,6 @@ def main():
         param_source_img = source_img
         param_video_cap = video_cap
     get_inputs_app = GetInputsApplication(master=root, on_load_complete=set_inputs)
-    model_future = executor.submit(download_and_load_model, get_inputs_app)
-    # model_future.add_done_callback(get_inputs_app.load_complete)
 
     cuda_worker_pool = CUDAWorkerPool(1)
 
@@ -957,7 +1041,7 @@ def main():
             param_video_cap
         ))
 
-    source_img_arr = prep_image_for_ml(param_source_img)
+    source_img_arr = np.array(param_source_img, dtype=np.uint8)
     for i in range(10):
         ret, frame = param_video_cap.read()
         if frame is None:
@@ -968,7 +1052,7 @@ def main():
     if frame is None:
         raise Exception("could not get an initial frame from video source. crashing.")
 
-    initial_image_arr = prep_image_for_ml(prep_frame(frame))
+    initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
     with cuda_worker_pool.entry_context(
         source_img_arr, 
         initial_image_arr
@@ -981,7 +1065,6 @@ def main():
             master=root
         )
         app2.mainloop()
-        app2.destroy()
         root.destroy()
 
 
