@@ -16,6 +16,11 @@ import multiprocessing.shared_memory as shared_memory
 import multiprocessing as mp
 import traceback
 import faulthandler
+from normalize_kp import normalize_kp
+from demo import load_checkpoints
+import tkinter.filedialog
+import tkinter.font
+import tkinter as tk
 
 faulthandler.enable()
 torch.backends.cudnn.benchmark = True
@@ -26,13 +31,6 @@ except:
     print("error importing gdown. Hopefully the archive is already downloaded..")
 
 warnings.filterwarnings("ignore")
-
-from normalize_kp import normalize_kp
-from demo import load_checkpoints
-
-import tkinter.filedialog
-import tkinter.font
-import tkinter as tk
 
 USE_CPU = not torch.cuda.is_available()
 INSTALLDIR = os.path.dirname(__file__)
@@ -1149,4 +1147,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # required so multiprocessing works with pyinstaller-bundled apps.
+    # see https://stackoverflow.com/questions/33870542/pyinstaller-and-multiprocessing
+    mp.freeze_support()
     main()
