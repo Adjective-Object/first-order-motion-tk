@@ -297,6 +297,10 @@ class NotifyChildProcessCrashed:
     def __init__(self):
         pass
 
+class NotifyWorkerReady:
+    def __init__(self):
+        pass
+
 
 class CUDAWorkerPool:
     def __init__(self, pool_size):
@@ -477,6 +481,7 @@ def process_worker_entrypoint(
     adapt_movement_scale = True
 
     debug("worker entering mainloop")
+    child_to_parent_message_queue.put(NotifyWorkerReady())
 
     try:
         while True:
@@ -718,8 +723,32 @@ class GetInputsApplication(tk.Frame):
         self.check_steal_button()
 
     def create_widgets(self):
-        self.steal_button = tk.Button(self)
+
+
+        left_frame = tk.Frame(self)
+        self.select_image_button = tk.Button(left_frame)
+        self.pack_button()
+        self.image_label = tk.Label(left_frame)
+        self.pack_preview_img()
+        self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
+        self.worker_count_str_var = tk.StringVar(self,"1")
+
+        bottom_frame = tk.Frame(self)
+        bottom_frame.pack(side="bottom")
+        left_frame.pack(side="left")
+        self.video_capture.pack(side="right")
+
+        self.steal_button = tk.Button(bottom_frame)
         self.steal_button["command"] = self.run_stolen_face
+        self.steal_button["text"] = "Borrow that face!"
+        self.steal_button["state"] = tk.DISABLED
+        self.steal_button.pack(side="right")
+
+        worker_count_dropdown_label = tk.Label(bottom_frame)
+        worker_count_dropdown_label["text"] = "Worker Count"
+        worker_count_dropdown_label.pack(side="left")
+        worker_count_dropdown = tk.OptionMenu(bottom_frame, self.worker_count_str_var, 1,2,3,4,5)
+        worker_count_dropdown.pack(side="left")
 
         self.loading_label = tk.Label(
             self, fg="green" if was_model_loaded_at_start() else "red"
@@ -753,15 +782,6 @@ class GetInputsApplication(tk.Frame):
             ] = "WARNING: Could not find CUDA. The neural network will be run on the CPU, and will not be realtime capable."
             cuda_warning.pack(side="bottom")
 
-        self.pack_steal_button()
-        left_frame = tk.Frame(self)
-        left_frame.pack(side="left")
-        self.select_image_button = tk.Button(left_frame)
-        self.pack_button()
-        self.image_label = tk.Label(left_frame)
-        self.pack_preview_img()
-        self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
-        self.pack_videocapture()
 
     def download_complete(self):
         self.loading_label["text"] = "Download complete"
@@ -769,13 +789,6 @@ class GetInputsApplication(tk.Frame):
         self.model_ready = True
         self.check_steal_button()
 
-    def pack_steal_button(self):
-        self.steal_button["text"] = "Borrow that face!"
-        self.steal_button["state"] = tk.DISABLED
-        self.steal_button.pack(side="bottom")
-
-    def pack_videocapture(self):
-        self.video_capture.pack(side="bottom")
 
     def pack_preview_img(self):
         self.img = Image.open(self.filename.get()).resize(
@@ -784,7 +797,7 @@ class GetInputsApplication(tk.Frame):
         self.photo_img = ImageTk.PhotoImage(self.img)
         self.image_label.configure(image=self.photo_img)
         self.image_label.image = self.photo_img
-        self.image_label.pack(side="top")
+        self.image_label.pack(side="left")
 
     def pack_button(self):
         self.select_image_button["text"] = os.path.basename(self.filename.get())
@@ -825,7 +838,7 @@ class GetInputsApplication(tk.Frame):
             and self.video_capture.video_display.cap is not None
             and self.video_capture.video_display.cap.isOpened()
         ):
-            self.on_load_complete(self.img, self.video_capture.video_display.cap)
+            self.on_load_complete(self.img, self.video_capture.video_display.cap, int(self.worker_count_str_var.get()))
             self.quit()
 
 
@@ -1087,18 +1100,20 @@ def main():
     root = tk.Tk()
     param_source_img = None
     param_video_cap = None
+    param_worker_count = None
 
-    def set_inputs(source_img, video_cap):
-        nonlocal param_source_img, param_video_cap
+    def set_inputs(source_img, video_cap, worker_count):
+        nonlocal param_source_img, param_video_cap, param_worker_count
         param_source_img = source_img
         param_video_cap = video_cap
+        param_worker_count = worker_count
 
     get_inputs_app = GetInputsApplication(master=root, on_load_complete=set_inputs)
 
-    cuda_worker_pool = CUDAWorkerPool(1)
-
     get_inputs_app.mainloop()
     get_inputs_app.destroy()
+
+    cuda_worker_pool = CUDAWorkerPool(param_worker_count)
 
     if param_source_img is None or param_video_cap is None:
         raise Exception(
