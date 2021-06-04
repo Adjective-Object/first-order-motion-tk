@@ -729,14 +729,13 @@ class GetInputsApplication(tk.Frame):
         self.select_image_button = tk.Button(left_frame)
         self.pack_button()
         self.image_label = tk.Label(left_frame)
-        self.pack_preview_img()
+        self.render_preview_img()
+
         self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
         self.worker_count_str_var = tk.StringVar(self,"1")
 
         bottom_frame = tk.Frame(self)
         bottom_frame.pack(side="bottom")
-        left_frame.pack(side="left")
-        self.video_capture.pack(side="right")
 
         self.steal_button = tk.Button(bottom_frame)
         self.steal_button["command"] = self.run_stolen_face
@@ -761,7 +760,8 @@ class GetInputsApplication(tk.Frame):
         self.loading_label.pack(side="bottom")
 
         if USE_CPU:
-            cuda_link = tk.Label(self, fg="red", cursor="hand2")
+            warning_area = tk.Frame(self)
+            cuda_link = tk.Label(warning_area, fg="red", cursor="hand2")
             cuda_link[
                 "text"
             ] = "You can get the drivers at https://developer.nvidia.com/cuda-downloads"
@@ -771,17 +771,21 @@ class GetInputsApplication(tk.Frame):
                     "https://developer.nvidia.com/cuda-downloads"
                 ),
             )
-            cuda_link.pack(side="bottom")
             f = tkinter.font.Font(cuda_link, cuda_link.cget("font"))
             f.configure(underline=True)
             cuda_link.configure(font=f)
 
-            cuda_warning = tk.Label(self, fg="red")
+            cuda_warning = tk.Label(warning_area, fg="red")
             cuda_warning[
                 "text"
-            ] = "WARNING: Could not find CUDA. The neural network will be run on the CPU, and will not be realtime capable."
-            cuda_warning.pack(side="bottom")
+            ] = "WARNING: Could not find CUDA.\n The neural network will be run on the CPU, and will not be realtime capable."
+            warning_area.pack(side="bottom")
+            cuda_warning.pack(side="top")
+            cuda_link.pack(side="top")
 
+        left_frame.pack(side="left")
+        self.image_label.pack(side="top")
+        self.video_capture.pack(side="right")
 
     def download_complete(self):
         self.loading_label["text"] = "Download complete"
@@ -790,14 +794,13 @@ class GetInputsApplication(tk.Frame):
         self.check_steal_button()
 
 
-    def pack_preview_img(self):
+    def render_preview_img(self):
         self.img = Image.open(self.filename.get()).resize(
             (256, 256), resample=Image.NEAREST
         )
         self.photo_img = ImageTk.PhotoImage(self.img)
         self.image_label.configure(image=self.photo_img)
         self.image_label.image = self.photo_img
-        self.image_label.pack(side="left")
 
     def pack_button(self):
         self.select_image_button["text"] = os.path.basename(self.filename.get())
@@ -815,10 +818,10 @@ class GetInputsApplication(tk.Frame):
         )
         if filename is not None:
             self.filename.set(filename)
-            self.pack_preview_img()
+            self.render_preview_img()
 
             self.pack_button()
-            self.pack_preview_img()
+            self.render_preview_img()
             self.check_steal_button()
 
     def check_steal_button(self, *argv):
