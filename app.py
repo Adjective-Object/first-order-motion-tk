@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore")
 USE_CPU = not torch.cuda.is_available()
 INSTALLDIR = os.path.dirname(__file__)
 SHARED_MEM_ID = os.getppid()
-
+TRACE_MALLOC = '--trace' in argv
 DEBUG = "-v" in argv or "--verbose" in argv
 header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
 
@@ -88,12 +88,27 @@ class DumbFutureLike:
             return self._result
 
 
-def bgr2rgb(arr):
-    return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+in_place_swap_arr = np.empty(shape=(256*256), dtype=np.uint8)
+def bgr2rgb(arr: np.ndarray):
+    slice_size = arr.shape[0] * arr.shape[1]
+    if (slice_size > in_place_swap_arr.shape[0]):
+        in_place_swap_arr.resize((slice_size,))
 
+    view = in_place_swap_arr[0:slice_size]
+    view[:] = arr[:,:,0].reshape((slice_size,))
+    arr[:,:,0] = arr[:,:,2]
+    arr[:,:,2] = view[:].reshape((arr.shape[0], arr.shape[1]))
+    return arr
 
-def rgb2bgr(arr):
-    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+rgb2bgr = bgr2rgb
+
+# def rgb2bgr(arr):
+#     in_place_swap_arr[:,:,:] = arr[:,:,:]
+#     arr[:,:,0] = arr[:,:,2]
+#     arr[:,:,1] = arr[:,:,1]
+#     arr[:,:,2] = arr[:,:,0]
+#     return arr
+#     # return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
 def prep_frame(frame, zoom_factor=0.8) -> Image:
@@ -454,6 +469,11 @@ def process_worker_entrypoint(
     child_to_parent_message_queue: mp.Queue,
     broadcast_channel_child,
 ):
+    if TRACE_MALLOC:
+        import tracemalloc
+        tracemalloc.start(8)
+        baseline_snapshot = tracemalloc.take_snapshot()
+
     debug("worker starting up")
 
     # load the model before we start listening for requests
@@ -482,7 +502,22 @@ def process_worker_entrypoint(
     child_to_parent_message_queue.put(NotifyWorkerReady())
 
     try:
+        i = 0
         while True:
+            if TRACE_MALLOC and i % 100 == 0:
+                loop_snapshot = tracemalloc.take_snapshot()
+                top_stats = loop_snapshot.compare_to(baseline_snapshot, 'traceback')
+
+                THRESHOLD = 40000
+                if any(stat.size > THRESHOLD for stat in top_stats):
+                    print("[ BIG ALLOCATORS ]")
+                    for stat in top_stats:
+                        if (stat.size > THRESHOLD):
+                            print(stat)
+                            print("Traceback (most recent call first):")
+                            for line in stat.traceback:
+                                print(line)
+
             parent_process_request: Union[
                 CUDARunRequest, NotifyUpdatedDrivingImg, NotifyUpdatedSettings, None
             ] = None
@@ -533,9 +568,10 @@ def process_worker_entrypoint(
 
                 out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
                 im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
-                im = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
+                im *= 255
+                # im = bgr2rgb(im)
                 output_shm_arr = parent_process_request.get_output_as_shm_array()
-                output_shm_arr.arr[:, :, :] = np.array(im * 255, dtype=np.uint8)
+                output_shm_arr.arr[:, :, :] = np.array(im, dtype=np.uint8)
 
                 debug("worker process posting result back to parent")
 
@@ -916,7 +952,7 @@ class Distorter(tk.Frame):
             debug("consuming result")
             # Read the image from the shared memory
             shm_array = cuda_request.get_output_as_shm_array()
-            self.img = Image.fromarray(rgb2bgr(shm_array.arr))
+            self.img = Image.fromarray(shm_array.arr)
             self.imgtk = ImageTk.PhotoImage(image=self.img)
             self.image_label.configure(image=self.imgtk)
             # print("delay to show", time() - self.last_frame_time_generated_time)

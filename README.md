@@ -53,5 +53,10 @@ tar -cf - ./dist/first-order-motion-tk | xz -4e > ./dist/first-order-motion-tk.t
 ## Profiling
 
 ```sh
+# Sampling profile of CPU usage
 pipenv run py-spy record -o profile.svg --subprocesses -- python app.py
+# Chart memory usage over time
+pipenv run psrecord "python app.py" --plot memplot.png --include-children
+# log traced allocations
+pipenv run python app.py --trace 
 ```

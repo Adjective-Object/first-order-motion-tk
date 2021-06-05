@@ -42,6 +42,7 @@ gdown = "*"
 [dev-packages]
 pyinstaller = "*"
 py-spy = "*"
+psrecord = "*"
 
 [requires]
 python_version = "3.9"
