@@ -36,6 +36,7 @@ USE_CPU = not torch.cuda.is_available()
 INSTALLDIR = os.path.dirname(__file__)
 SHARED_MEM_ID = os.getppid()
 TRACE_MALLOC = '--trace' in argv
+TRACE_GC = '--trace-gc' in argv
 DEBUG = "-v" in argv or "--verbose" in argv
 header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
 
@@ -473,6 +474,11 @@ def process_worker_entrypoint(
         import tracemalloc
         tracemalloc.start(8)
         baseline_snapshot = tracemalloc.take_snapshot()
+    if TRACE_GC:
+        import gc
+        gc.set_debug(
+            gc.DEBUG_STATS | gc.DEBUG_LEAK
+        )
 
     debug("worker starting up")
 
@@ -504,6 +510,9 @@ def process_worker_entrypoint(
     try:
         i = 0
         while True:
+            if TRACE_GC and i%100 == 0:
+                print("gc stats:", gc.get_stats())
+
             if TRACE_MALLOC and i % 100 == 0:
                 loop_snapshot = tracemalloc.take_snapshot()
                 top_stats = loop_snapshot.compare_to(baseline_snapshot, 'traceback')
