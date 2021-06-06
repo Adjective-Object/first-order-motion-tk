@@ -1,3 +1,4 @@
+from asyncio.tasks import Task
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import pool
 import os.path
@@ -10,7 +11,7 @@ import zipfile
 import numpy as np
 import warnings
 from PIL import ImageTk, Image
-from time import time
+import time
 import webbrowser
 import multiprocessing.shared_memory as shared_memory
 import multiprocessing as mp
@@ -21,6 +22,7 @@ from demo import load_checkpoints
 import tkinter.filedialog
 import tkinter.font
 import tkinter as tk
+import asyncio
 
 faulthandler.enable()
 torch.backends.cudnn.benchmark = True
@@ -315,7 +317,7 @@ class NotifyWorkerReady:
     def __init__(self):
         pass
 
-
+JOB_SLOTS_PER_WORKER = 2
 class CUDAWorkerPool:
     def __init__(self, pool_size):
         # we have to use spawn here rather than fork, because CUDA cannot be reinitialized
@@ -332,7 +334,7 @@ class CUDAWorkerPool:
         # has been released, so keeping these slots open should allow
         # the subprocesses to consume the next result after posting back results.
         # without waiting on the consumer to read the data out and release the slot.
-        self.shared_data = SharedData(pool_size * 2)
+        self.shared_data = SharedData(pool_size * JOB_SLOTS_PER_WORKER)
         self.request_futures = dict()
 
     def step_loop(self):
@@ -608,6 +610,7 @@ class VideoDisplay(tk.Widget):
         self.crop = crop
         self.oncamloaded = oncamloaded
         self.zoom_factor_var = zoom_factor_var
+        self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_var else None
 
         if cap and not cap.isOpened():
             raise ValueError("Cap was not open?")
@@ -617,7 +620,9 @@ class VideoDisplay(tk.Widget):
         self.image_label = tk.Label(self)
         self.image_label.pack(side="top")
         self.request_frame()
-        self.after(VIDEO_DISPLAY_FRAME_DELAY, self.poll_frame)
+
+        # defer until tkinter has started
+        self.after(0, lambda: asyncio.get_event_loop().create_task(asyncio.sleep(VIDEO_DISPLAY_FRAME_DELAY / 1000)).add_done_callback(self.poll_frame))
 
     def set_cap(self, cap):
         self.cap = cap
@@ -627,29 +632,32 @@ class VideoDisplay(tk.Widget):
         if self.oncamloaded is not None:
             self.oncamloaded()
 
-    def request_frame(self):
+    def request_frame(self, *argv):
         on_captured = executor.submit(self.capture_frame)
         on_captured.add_done_callback(self.notify_needs_show_frame)
-        on_captured.add_done_callback(self.schedule_next_request)
-
-    def schedule_next_request(self, frame):
-        self.after(VIDEO_DISPLAY_FRAME_DELAY, self.request_frame)
 
     def notify_needs_show_frame(self, frame_future):
-        # print("notify_needs_show_frame", os.getpid())
         frame = frame_future.result()
-        if frame:
+        if frame is not None:
             self.img = frame
             self.frame_needs_update = True
+        else:
+            time.sleep(VIDEO_DISPLAY_FRAME_DELAY/ 1000)
+            executor.submit(self.request_frame)
 
-    def poll_frame(self):
+    def poll_frame(self, *argv):
+        """
+        Polls for an available frame (populated from the thread pool executor in request_frame -> capture_frame)
+        """
         try:
             if self.frame_needs_update:
                 self.frame_needs_update = False
                 self.imgtk = ImageTk.PhotoImage(image=self.img)
                 self.image_label.configure(image=self.imgtk)
+                self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_val else None
+                self.request_frame()
         finally:
-            self.after(VIDEO_DISPLAY_FRAME_DELAY, self.poll_frame)
+            asyncio.get_event_loop().create_task(asyncio.sleep(VIDEO_DISPLAY_FRAME_DELAY / 1000)).add_done_callback(self.poll_frame)
 
     def capture_frame(self):
         # print("capture_frame", os.getpid())
@@ -658,7 +666,7 @@ class VideoDisplay(tk.Widget):
             if frame is not None:
                 if self.crop:
                     zoom_factor = (
-                        self.zoom_factor_var.get() if self.zoom_factor_var else None
+                        self.zoom_factor_val if self.zoom_factor_var else None
                     )
                     return prep_frame(frame, zoom_factor=zoom_factor)
                 else:
@@ -687,7 +695,7 @@ class VideoCapture(tk.Widget):
         self.repack()
         self.selected_camera = tk.StringVar()
         self.selected_camera.trace("w", self.update_capture)
-        self.after(1, self.update_camera_list_and_repack)
+        asyncio.get_event_loop().create_task(asyncio.sleep(1 / 1000)).add_done_callback(self.update_camera_list_and_repack)
 
     def repack(self):
         self.refresh_button.pack(side="bottom")
@@ -716,7 +724,7 @@ class VideoCapture(tk.Widget):
         else:
             self.video_display.set_cap(None)
 
-    def update_camera_list_and_repack(self):
+    def update_camera_list_and_repack(self, *argv):
         i = 0
         cameras = []
         while True:
@@ -887,9 +895,7 @@ class GetInputsApplication(tk.Frame):
             self.on_load_complete(self.img, self.video_capture.video_display.cap, int(self.worker_count_str_var.get()))
             self.quit()
 
-
-ML_FRAME_INTERVAL = 1000 // 24
-
+ML_FRAME_INTERVAL = 1000 // 60
 
 def prep_image_for_ml(prepped_frame):
     return np.array(prepped_frame)[:, :, :3] / 255
@@ -919,7 +925,10 @@ class Distorter(tk.Frame):
         self.fps_var = fps_var
         self.zoom_factor_var = zoom_factor_var
 
-        self.after(ML_FRAME_INTERVAL, self.request_frame)
+        # schedule after tkinter starts running
+        self.after(0, lambda: asyncio.get_event_loop().create_task(asyncio.sleep(ML_FRAME_INTERVAL / 1000)).add_done_callback(self.request_frame))
+        self.last_request_time = 0
+        self.last_request_succ_time = 0
 
         # generate widgets
         self.create_widgets(initial_frame_img)
@@ -937,12 +946,19 @@ class Distorter(tk.Frame):
         else:
             return None
 
-    def request_frame(self):
+    def request_frame(self, *argv):
+        t = time.time()
+        delta = t - self.last_request_time
+        print("request_attempt_interval %02.02f" % (1/delta), delta)
+        self.last_request_time = t
         prepped_frame_arr = self.get_prepped_frame_arr()
         if prepped_frame_arr is not None:
             future = self.cuda_worker_pool.try_submit_job(self.seq, prepped_frame_arr)
             self.seq += 1
             if future:
+                succ_delta = t - self.last_request_succ_time
+                print("request_attempt_suc %02.02f" % (1/succ_delta), succ_delta)
+                self.last_request_succ_time = t
                 debug("waiting for job result")
                 future.add_done_callback(self.render_cuda_request_result)
             else:
@@ -952,7 +968,7 @@ class Distorter(tk.Frame):
             debug("failed to get frame from video source")
             pass
 
-        self.after(ML_FRAME_INTERVAL, self.request_frame)
+        asyncio.get_event_loop().create_task(asyncio.sleep(ML_FRAME_INTERVAL / 1000)).add_done_callback(self.request_frame)
 
     def render_cuda_request_result(self, cuda_request_future):
         cuda_request: CUDARunRequest = cuda_request_future.result()
@@ -964,7 +980,7 @@ class Distorter(tk.Frame):
             self.img = Image.fromarray(shm_array.arr)
             self.imgtk = ImageTk.PhotoImage(image=self.img)
             self.image_label.configure(image=self.imgtk)
-            # print("delay to show", time() - self.last_frame_time_generated_time)
+            # print("delay to show", time.time() - self.last_frame_time_generated_time)
             self.tick_fps()
         else:
             debug("ignoring result due to out-of-order return")
@@ -988,7 +1004,7 @@ class Distorter(tk.Frame):
             debug("failed to get frame to update the initial driving frame")
 
     def tick_fps(self):
-        now = time()
+        now = time.time()
         if self.fps_var is not None and self.last_frame_time is not None:
             delta = now - self.last_frame_time
             if self.last_frame_interval_rolling_delta == None:
@@ -1011,9 +1027,6 @@ def oneshot_run_kp(kp_detector, frame):
         source1 = source1.cuda()
 
     return kp_detector(source1)
-
-
-CUDA_MAIN_LOOP_TICK_DELAY = 1
 
 
 class RunSimulationApplication(tk.Frame):
@@ -1042,18 +1055,12 @@ class RunSimulationApplication(tk.Frame):
         self.pack()
         self.create_widgets(initial_frame_img)
 
-        self.after(CUDA_MAIN_LOOP_TICK_DELAY, self.step_cuda_worker_pool_main_loop)
-
     def on_settings_var_updated(self, *argv):
         self.cuda_worker_pool.update_settings(
             use_relative_movement=self.use_relative_movement_var.get(),
             use_relative_jacobian=self.use_relative_jacobian_var.get(),
             adapt_movement_scale=self.adapt_movement_scale_var.get(),
         )
-
-    def step_cuda_worker_pool_main_loop(self):
-        self.cuda_worker_pool.step_loop()
-        self.after(CUDA_MAIN_LOOP_TICK_DELAY, self.step_cuda_worker_pool_main_loop)
 
     def create_widgets(self, initial_frame_img):
         top_frame = tk.Frame(self)
@@ -1134,6 +1141,22 @@ class RunSimulationApplication(tk.Frame):
 
 executor = None
 
+async def run_tk(root, condition, period = 0.05):
+    '''
+    Run a tkinter app in an asyncio event loop.
+    '''
+    try:
+        while not condition():
+            root.update()
+            await asyncio.sleep(period / 1000)
+    except tk.TclError as e:
+        if "application has been destroyed" not in e.args[0]:
+            raise
+
+async def periodic(cb, period = 0.05):
+    while True:
+        cb()
+        await asyncio.sleep(period / 1000)
 
 def main():
     global SHARED_MEM_ID
@@ -1144,20 +1167,39 @@ def main():
     debug("main process started")
 
     root = tk.Tk()
+    inputs_set = False
     param_source_img = None
     param_video_cap = None
     param_worker_count = None
 
     def set_inputs(source_img, video_cap, worker_count):
-        nonlocal param_source_img, param_video_cap, param_worker_count
+        nonlocal param_source_img, param_video_cap, param_worker_count, inputs_set
+        inputs_set = True
         param_source_img = source_img
         param_video_cap = video_cap
         param_worker_count = worker_count
+    
+    def is_initialized():
+        return inputs_set
 
     get_inputs_app = GetInputsApplication(master=root, on_load_complete=set_inputs)
 
-    get_inputs_app.mainloop()
+    print("initializing app")
+
+    loop = asyncio.get_event_loop()
+    try:
+        print("run that loop")
+        loop.run_until_complete(run_tk(root, is_initialized))
+    except KeyboardInterrupt:
+        pass
+
     get_inputs_app.destroy()
+
+    print("parameters:",
+            param_source_img,
+            param_video_cap,
+            param_worker_count,
+    )
 
     cuda_worker_pool = CUDAWorkerPool(param_worker_count)
 
@@ -1180,14 +1222,20 @@ def main():
 
     initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
     with cuda_worker_pool.entry_context(source_img_arr, initial_image_arr):
-        print("entering worker pool")
         app2 = RunSimulationApplication(
             initial_frame_img=param_source_img,
             video_capture=param_video_cap,
             cuda_worker_pool=cuda_worker_pool,
             master=root,
         )
-        app2.mainloop()
+
+        loop.run_until_complete(
+            asyncio.gather(
+                run_tk(root, lambda: False),
+                periodic( cuda_worker_pool.step_loop)
+            )
+        )
+
         root.destroy()
 
 
