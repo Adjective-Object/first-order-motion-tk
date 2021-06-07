@@ -2,7 +2,7 @@ from asyncio.tasks import Task
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import pool
 import os.path
-from sys import exit, argv
+from sys import exit, argv, stderr
 from queue import Empty
 from typing import List, Union
 import cv2
@@ -30,7 +30,7 @@ torch.backends.cudnn.benchmark = True
 try:
     from gdown import download as gdown_download
 except:
-    print("error importing gdown. Hopefully the archive is already downloaded..")
+    print("error importing gdown. Hopefully the archive is already downloaded..", file=sys.stderr)
 
 warnings.filterwarnings("ignore")
 
@@ -43,10 +43,10 @@ DEBUG = "-v" in argv or "--verbose" in argv
 header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
 
 
-def debug(*argv):
+def debug(*argv, **kwarg):
     if not DEBUG:
         return
-    print(header, *argv)
+    print(header, *argv, file=stderr, **kwarg)
 
 
 debug(
@@ -234,8 +234,11 @@ class SharedData:
         ]
         self.open_outputs = list(range(self._pool_slots))
 
+    def has_available_slot(self):
+        return len(self.open_inputs) > 0 and len(self.open_outputs) > 0
+
     def try_get_available_in_out_pair(self):
-        if len(self.open_inputs) == 0 or len(self.open_outputs) == 0:
+        if not self.has_available_slot():
             return None
 
         in_slot = self.open_inputs.pop()
@@ -388,6 +391,10 @@ class CUDAWorkerPool:
         initial_driving_img_shm_arr = SHMArray(get_initial_driving_img_name())
         initial_driving_img_shm_arr.arr[:, :, :] = new_driving_img
         self.broadcast_channel_parent.send(NotifyUpdatedDrivingImg())
+
+
+    def has_open_slot(self):
+        return self.shared_data.has_available_slot()
 
     def try_submit_job(self, seq: int, driving_arr: np.ndarray):
         io_slot = self.shared_data.try_get_available_in_out_pair()
@@ -709,7 +716,6 @@ class VideoCapture(tk.Widget):
         idx_str = self.selected_camera.get()[len("Camera ") :]
         if len(idx_str):
             idx = int(idx_str)
-            print("updating capture to idx", idx)
             cap = cv2.VideoCapture(idx)
 
             if not cap.isOpened():
@@ -740,7 +746,6 @@ class VideoCapture(tk.Widget):
 
         print(self.selected_camera.get())
         if self.selected_camera.get() == "":
-            print("setting")
             self.selected_camera.set(cameras[0])
 
         if self.cam_dropdown is not None:
@@ -949,24 +954,32 @@ class Distorter(tk.Frame):
     def request_frame(self, *argv):
         t = time.time()
         delta = t - self.last_request_time
-        print("request_attempt_interval %02.02f" % (1/delta), delta)
+        print("%02.04f, %02.04f,, " % (t, delta))
         self.last_request_time = t
-        prepped_frame_arr = self.get_prepped_frame_arr()
-        if prepped_frame_arr is not None:
-            future = self.cuda_worker_pool.try_submit_job(self.seq, prepped_frame_arr)
-            self.seq += 1
-            if future:
-                succ_delta = t - self.last_request_succ_time
-                print("request_attempt_suc %02.02f" % (1/succ_delta), succ_delta)
-                self.last_request_succ_time = t
-                debug("waiting for job result")
-                future.add_done_callback(self.render_cuda_request_result)
-            else:
-                debug("did not submit frame to worker pool: no available workers")
-                pass
+
+        if (not self.cuda_worker_pool.has_open_slot()):
+            debug("skipping schedule attempt -- no available slots!")
+            # don't hold the CPU polling and prepping a frame
+            # if there is no available job slot.
         else:
-            debug("failed to get frame from video source")
-            pass
+            prepped_frame_arr = self.get_prepped_frame_arr()
+            if prepped_frame_arr is not None:
+                future = self.cuda_worker_pool.try_submit_job(self.seq, prepped_frame_arr)
+                self.seq += 1
+                if future:
+                    succ_delta = t - self.last_request_succ_time
+                    # print("request_attempt_suc %02.04f" % (1/succ_delta), succ_delta)
+                    print("%02.04f, , %02.04f, " % (t, succ_delta))
+
+                    self.last_request_succ_time = t
+                    debug("waiting for job result")
+                    future.add_done_callback(self.render_cuda_request_result)
+                else:
+                    debug("did not submit prepped frame to worker pool: no available workers")
+                    pass
+            else:
+                debug("failed to get frame from video source")
+                pass
 
         asyncio.get_event_loop().create_task(asyncio.sleep(ML_FRAME_INTERVAL / 1000)).add_done_callback(self.request_frame)
 
@@ -1015,6 +1028,7 @@ class Distorter(tk.Frame):
                     * (1 - FPS_COUNTER_FALLOFF_RATIO)
                     + (FPS_COUNTER_FALLOFF_RATIO * delta)
                 )
+            print("%02.04f, , , %02.04f" % (now, delta))
             self.fps_var.set(
                 "fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta))
             )
@@ -1184,22 +1198,19 @@ def main():
 
     get_inputs_app = GetInputsApplication(master=root, on_load_complete=set_inputs)
 
-    print("initializing app")
-
     loop = asyncio.get_event_loop()
     try:
-        print("run that loop")
         loop.run_until_complete(run_tk(root, is_initialized))
     except KeyboardInterrupt:
         pass
 
     get_inputs_app.destroy()
 
-    print("parameters:",
-            param_source_img,
-            param_video_cap,
-            param_worker_count,
-    )
+    # print("parameters:",
+    #         param_source_img,
+    #         param_video_cap,
+    #         param_worker_count,
+    # )
 
     cuda_worker_pool = CUDAWorkerPool(param_worker_count)
 
@@ -1232,7 +1243,7 @@ def main():
         loop.run_until_complete(
             asyncio.gather(
                 run_tk(root, lambda: False),
-                periodic( cuda_worker_pool.step_loop)
+                periodic(cuda_worker_pool.step_loop)
             )
         )
 
@@ -1242,5 +1253,6 @@ def main():
 if __name__ == "__main__":
     # required so multiprocessing works with pyinstaller-bundled apps.
     # see https://stackoverflow.com/questions/33870542/pyinstaller-and-multiprocessing
+    print("time, request_attempt_interval, request_succ_interval, frame_delta")
     mp.freeze_support()
     main()
