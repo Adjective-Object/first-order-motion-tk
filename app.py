@@ -26,6 +26,7 @@ import asyncio
 
 faulthandler.enable()
 torch.backends.cudnn.benchmark = True
+start_time = 0
 
 try:
     from gdown import download as gdown_download
@@ -90,6 +91,32 @@ class DumbFutureLike:
         else:
             return self._result
 
+DEFAULT_NO_GRAB_FRAME_TIMEOUT = 1000/60
+class CV2VideoCaptureWrapper:
+    def __init__(self, cv2_video_capture, no_grab_frame_timeout_s=DEFAULT_NO_GRAB_FRAME_TIMEOUT):
+        self.cv2_video_capture = cv2_video_capture
+        self.no_grab_frame_timeout_s = no_grab_frame_timeout_s
+        self.last_frame_time = None
+        self._captured_frame_buf = None
+
+    def request_video_frame(self, force_new=False):
+        now = time.time()
+        if (force_new
+            or self._captured_frame_buf is None
+            or self.last_frame_time == None
+            or (now - self.last_frame_time) > self.no_grab_frame_timeout_s):
+            self._get_frame()
+
+        return self._captured_frame_buf
+
+    def _get_frame(self):
+        if self._captured_frame_buf is None:
+            self._captured_frame_buf = self.cv2_video_capture.read()[1]
+        else:
+            self.cv2_video_capture.read(self._captured_frame_buf)[1]
+    
+    def isOpened(self):
+        return self.cv2_video_capture.isOpened()
 
 in_place_swap_arr = np.empty(shape=(256*256), dtype=np.uint8)
 def bgr2rgb(arr: np.ndarray):
@@ -669,7 +696,7 @@ class VideoDisplay(tk.Widget):
     def capture_frame(self):
         # print("capture_frame", os.getpid())
         if self.cap is not None:
-            ret, frame = self.cap.read()
+            frame = self.cap.request_video_frame()
             if frame is not None:
                 if self.crop:
                     zoom_factor = (
@@ -716,7 +743,7 @@ class VideoCapture(tk.Widget):
         idx_str = self.selected_camera.get()[len("Camera ") :]
         if len(idx_str):
             idx = int(idx_str)
-            cap = cv2.VideoCapture(idx)
+            cap = CV2VideoCaptureWrapper(cv2.VideoCapture(idx))
 
             if not cap.isOpened():
                 self.error_label["text"] = "Error Opening Camera %s" % idx
@@ -735,16 +762,15 @@ class VideoCapture(tk.Widget):
         cameras = []
         while True:
             cap = cv2.VideoCapture(i)
-            if i > 10 and (not cap.isOpened() or cap.read()[1] == None):
+            if i > 10 and (not cap.isOpened() or cap.request_video_frame() == None):
                 break
             if cap.isOpened():
                 cameras.append("Camera %s" % i)
             i += 1
 
         if len(cameras):
-            self.video_capture = cv2.VideoCapture(len(cameras) - 1)
+            self.video_capture = CV2VideoCaptureWrapper(cv2.VideoCapture(len(cameras) - 1))
 
-        print(self.selected_camera.get())
         if self.selected_camera.get() == "":
             self.selected_camera.set(cameras[0])
 
@@ -779,8 +805,6 @@ class GetInputsApplication(tk.Frame):
         self.check_steal_button()
 
     def create_widgets(self):
-
-
         left_frame = tk.Frame(self)
         self.select_image_button = tk.Button(left_frame)
         self.pack_button()
@@ -900,7 +924,7 @@ class GetInputsApplication(tk.Frame):
             self.on_load_complete(self.img, self.video_capture.video_display.cap, int(self.worker_count_str_var.get()))
             self.quit()
 
-ML_FRAME_INTERVAL = 1000 // 60
+ML_FRAME_INTERVAL = 1000 // 24
 
 def prep_image_for_ml(prepped_frame):
     return np.array(prepped_frame)[:, :, :3] / 255
@@ -939,7 +963,7 @@ class Distorter(tk.Frame):
         self.create_widgets(initial_frame_img)
 
     def get_prepped_frame_arr(self):
-        ret, video_frame = self.video_capture.read()
+        video_frame = self.video_capture.request_video_frame(True)
         if video_frame is not None:
             return np.array(
                 prep_frame(
@@ -954,7 +978,7 @@ class Distorter(tk.Frame):
     def request_frame(self, *argv):
         t = time.time()
         delta = t - self.last_request_time
-        print("%02.04f, %02.04f,, " % (t, delta))
+        print("%02.04f, %02.04f,, " % (t - start_time, delta))
         self.last_request_time = t
 
         if (not self.cuda_worker_pool.has_open_slot()):
@@ -969,7 +993,7 @@ class Distorter(tk.Frame):
                 if future:
                     succ_delta = t - self.last_request_succ_time
                     # print("request_attempt_suc %02.04f" % (1/succ_delta), succ_delta)
-                    print("%02.04f, , %02.04f, " % (t, succ_delta))
+                    print("%02.04f, , %02.04f, " % (t - start_time, succ_delta))
 
                     self.last_request_succ_time = t
                     debug("waiting for job result")
@@ -1028,7 +1052,7 @@ class Distorter(tk.Frame):
                     * (1 - FPS_COUNTER_FALLOFF_RATIO)
                     + (FPS_COUNTER_FALLOFF_RATIO * delta)
                 )
-            print("%02.04f, , , %02.04f" % (now, delta))
+            print("%02.04f, , , %02.04f" % (now - start_time, delta))
             self.fps_var.set(
                 "fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta))
             )
@@ -1222,7 +1246,7 @@ def main():
 
     source_img_arr = np.array(param_source_img, dtype=np.uint8)
     for i in range(10):
-        ret, frame = param_video_cap.read()
+        frame = param_video_cap.request_video_frame()
         if frame is None:
             print("failed to get frame from video source. Trying again.")
             time.sleep(0.1)
@@ -1239,6 +1263,9 @@ def main():
             cuda_worker_pool=cuda_worker_pool,
             master=root,
         )
+
+        global start_time
+        start_time = time.time()
 
         loop.run_until_complete(
             asyncio.gather(
