@@ -23,6 +23,8 @@ import tkinter.filedialog
 import tkinter.font
 import tkinter as tk
 import asyncio
+# import gc
+# gc.disable()
 
 faulthandler.enable()
 torch.backends.cudnn.benchmark = True
@@ -446,7 +448,7 @@ class CUDAWorkerPool:
         self.shared_data.shared_initial_driving_arr.arr[
             :, :, :
         ] = initial_driving_img_arr
-        self.shared_data.shared_source_arr.arr[:, :, :] = source_arr
+        self.shared_data.shared_source_arr.arr[:, :, :] = source_arr[:,:,0:3]
 
         self.broadcast_channel_parent, self.broadcast_channel_child = self.ctx.Pipe()
 
@@ -793,7 +795,7 @@ class GetInputsApplication(tk.Frame):
         super().__init__(master)
         self.filename = tk.StringVar(
             self,
-            os.path.join(INSTALLDIR, "source_image_inputs", "the_rock_colorkey.jpeg"),
+            os.path.join(INSTALLDIR, "source_image_inputs", "shrek_pink_colorkey.jpg"),
         )
 
         self.master = master
@@ -978,7 +980,7 @@ class Distorter(tk.Frame):
     def request_frame(self, *argv):
         t = time.time()
         delta = t - self.last_request_time
-        print("%02.04f, %02.04f,, " % (t - start_time, delta))
+        # print("%02.04f, %02.04f,, " % (t - start_time, delta))
         self.last_request_time = t
 
         if (not self.cuda_worker_pool.has_open_slot()):
@@ -993,7 +995,7 @@ class Distorter(tk.Frame):
                 if future:
                     succ_delta = t - self.last_request_succ_time
                     # print("request_attempt_suc %02.04f" % (1/succ_delta), succ_delta)
-                    print("%02.04f, , %02.04f, " % (t - start_time, succ_delta))
+                    # print("%02.04f, , %02.04f, " % (t - start_time, succ_delta))
 
                     self.last_request_succ_time = t
                     debug("waiting for job result")
@@ -1052,7 +1054,7 @@ class Distorter(tk.Frame):
                     * (1 - FPS_COUNTER_FALLOFF_RATIO)
                     + (FPS_COUNTER_FALLOFF_RATIO * delta)
                 )
-            print("%02.04f, , , %02.04f" % (now - start_time, delta))
+            # print("%02.04f, , , %02.04f" % (now - start_time, delta))
             self.fps_var.set(
                 "fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta))
             )
