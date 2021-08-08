@@ -23,6 +23,8 @@ import tkinter.filedialog
 import tkinter.font
 import tkinter as tk
 import asyncio
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # import gc
 # gc.disable()
 
@@ -156,7 +158,7 @@ def prep_frame(frame, zoom_factor=0.8) -> Image:
 
     frame = frame[y : y + h, x : x + w, :]
 
-    return Image.fromarray(frame).resize((256, 256), resample=Image.NEAREST)
+    return cv2.resize(frame, (256,256), interpolation=cv2.INTER_NEAREST)
 
 
 def download_model():
@@ -639,22 +641,27 @@ VIDEO_DISPLAY_FRAME_DELAY = int(1000 / 24)
 
 class VideoDisplay(tk.Widget):
     frame_needs_update = False
+    
+    figure: Figure
 
-    def __init__(self, parent, cap, oncamloaded=None, zoom_factor_var=None, crop=True):
+    def __init__(self, parent, cap, on_cam_loaded=None, zoom_factor_var=None, crop=True):
         tk.Frame.__init__(self, parent)
         self.cap = cap
         self.crop = crop
-        self.oncamloaded = oncamloaded
+        self.on_cam_loaded = on_cam_loaded
         self.zoom_factor_var = zoom_factor_var
         self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_var else None
 
         if cap and not cap.isOpened():
             raise ValueError("Cap was not open?")
 
-        self.img = None
-        self.imgtk = None
-        self.image_label = tk.Label(self)
-        self.image_label.pack(side="top")
+        self.figure = Figure(figsize=(1,1), dpi=255)
+        self.ax_plot = self.figure.add_subplot(1, 1, 1)
+        self.figure.subplots_adjust(bottom=0, top=1, left=0, right=1)
+        self.ax_plot.set_facecolor("#ff00ff")
+        self.ax_plot.set_axis_off()
+        self.canvas = FigureCanvasTkAgg(self.figure, parent)
+        self.canvas.get_tk_widget().pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
         self.request_frame()
 
         # defer until tkinter has started
@@ -663,10 +670,9 @@ class VideoDisplay(tk.Widget):
     def set_cap(self, cap):
         self.cap = cap
         if cap is None:
-            self.imgtk = None
-            self.img = None
-        if self.oncamloaded is not None:
-            self.oncamloaded()
+            pass
+        if self.on_cam_loaded is not None:
+            self.on_cam_loaded()
 
     def request_frame(self, *argv):
         on_captured = executor.submit(self.capture_frame)
@@ -675,10 +681,11 @@ class VideoDisplay(tk.Widget):
     def notify_needs_show_frame(self, frame_future):
         frame = frame_future.result()
         if frame is not None:
-            self.img = frame
+            # print(frame.shape, frame.dtype, frame.min(), frame.max())
+            self.ax_plot.imshow(frame, vmin=0, vmax=255)
             self.frame_needs_update = True
         else:
-            time.sleep(VIDEO_DISPLAY_FRAME_DELAY/ 1000)
+            # time.sleep(VIDEO_DISPLAY_FRAME_DELAY/ 1000)
             executor.submit(self.request_frame)
 
     def poll_frame(self, *argv):
@@ -688,8 +695,7 @@ class VideoDisplay(tk.Widget):
         try:
             if self.frame_needs_update:
                 self.frame_needs_update = False
-                self.imgtk = ImageTk.PhotoImage(image=self.img)
-                self.image_label.configure(image=self.imgtk)
+                # self.canvas.draw()
                 self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_val else None
                 self.request_frame()
         finally:
@@ -706,12 +712,12 @@ class VideoDisplay(tk.Widget):
                     )
                     return prep_frame(frame, zoom_factor=zoom_factor)
                 else:
-                    return Image.fromarray(frame)
+                    return frame
         return None
 
 
 class VideoCapture(tk.Widget):
-    def __init__(self, parent, oncamloaded=None):
+    def __init__(self, parent, on_cam_loaded=None):
         tk.Frame.__init__(self, parent)
 
         self.refresh_button = tk.Button(self)
@@ -724,7 +730,7 @@ class VideoCapture(tk.Widget):
 
         self.cam_dropdown = None
         self.video_display = VideoDisplay(
-            self, None, oncamloaded=oncamloaded, crop=True
+            self, None, on_cam_loaded=on_cam_loaded, crop=True
         )
         self.error_label = tk.Label(self, fg="red")
 
@@ -813,7 +819,7 @@ class GetInputsApplication(tk.Frame):
         self.image_label = tk.Label(left_frame)
         self.render_preview_img()
 
-        self.video_capture = VideoCapture(self, oncamloaded=self.check_steal_button)
+        self.video_capture = VideoCapture(self, on_cam_loaded=self.check_steal_button)
         self.worker_count_str_var = tk.StringVar(self,"1")
 
         bottom_frame = tk.Frame(self)
