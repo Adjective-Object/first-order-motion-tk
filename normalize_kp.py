@@ -1,3 +1,4 @@
+from modules.util import get_inverse_kp_jacobian
 import torch
 from scipy.spatial import ConvexHull
 import numpy as np
@@ -20,7 +21,13 @@ def normalize_kp(kp_source, kp_driving, kp_driving_initial, adapt_movement_scale
         kp_new['value'] = kp_value_diff + kp_source['value']
 
         if use_relative_jacobian:
-            jacobian_diff = torch.matmul(kp_driving['jacobian'], torch.inverse(kp_driving_initial['jacobian']))
+            jacobian_diff = torch.matmul(kp_driving['jacobian'], get_inverse_kp_jacobian(kp_driving_initial))
             kp_new['jacobian'] = torch.matmul(jacobian_diff, kp_source['jacobian'])
+
+    # precalculate the inverse jacobian of driving features
+    # to avoid redundant GPU syncs while running the network
+    #
+    # (this caches the inverse jacobian on the keypoint dict)
+    get_inverse_kp_jacobian(kp_new)
 
     return kp_new

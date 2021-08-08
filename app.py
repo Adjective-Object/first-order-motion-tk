@@ -624,7 +624,8 @@ def process_worker_entrypoint(
                 )
 
                 out = generator(source_tensor, kp_source=kp_source, kp_driving=kp_norm)
-                im = np.transpose(out["prediction"].data.cpu().numpy(), [0, 2, 3, 1])[0]
+                out_data_cpu = out["prediction"].data.cpu()
+                im = np.transpose(out_data_cpu.numpy(), [0, 2, 3, 1])[0]
                 im *= 255
                 # im = bgr2rgb(im)
                 output_shm_arr = parent_process_request.get_output_as_shm_array()

@@ -1,7 +1,7 @@
 from torch import nn
 import torch
 import torch.nn.functional as F
-from modules.util import AntiAliasInterpolation2d, make_coordinate_grid
+from modules.util import AntiAliasInterpolation2d, get_inverse_kp_jacobian, make_coordinate_grid
 from torchvision import models
 import numpy as np
 from torch.autograd import grad
@@ -210,7 +210,7 @@ class GeneratorFullModel(torch.nn.Module):
                 jacobian_transformed = torch.matmul(transform.jacobian(transformed_kp['value']),
                                                     transformed_kp['jacobian'])
 
-                normed_driving = torch.inverse(kp_driving['jacobian'])
+                normed_driving = get_inverse_kp_jacobian(kp_driving)
                 normed_transformed = jacobian_transformed
                 value = torch.matmul(normed_driving, normed_transformed)
 

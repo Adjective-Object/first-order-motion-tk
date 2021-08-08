@@ -5,7 +5,6 @@ import torch
 
 from sync_batchnorm import SynchronizedBatchNorm2d as BatchNorm2d
 
-
 def kp2gaussian(kp, spatial_size, kp_variance):
     """
     Transform a keypoint into gaussian like representation
@@ -13,6 +12,7 @@ def kp2gaussian(kp, spatial_size, kp_variance):
     mean = kp['value']
 
     coordinate_grid = make_coordinate_grid(spatial_size, mean.type())
+
     number_of_leading_dimensions = len(mean.shape) - 1
     shape = (1,) * number_of_leading_dimensions + coordinate_grid.shape
     coordinate_grid = coordinate_grid.view(*shape)
@@ -29,11 +29,17 @@ def kp2gaussian(kp, spatial_size, kp_variance):
 
     return out
 
+saved_grids = dict()
 
 def make_coordinate_grid(spatial_size, type):
     """
     Create a meshgrid [-1,1] x [-1,1] of given spatial_size.
     """
+
+    combined_key = (spatial_size, type)
+    if combined_key in saved_grids:
+        return saved_grids[combined_key]
+
     h, w = spatial_size
     x = torch.arange(w).type(type)
     y = torch.arange(h).type(type)
@@ -44,9 +50,22 @@ def make_coordinate_grid(spatial_size, type):
     yy = y.view(-1, 1).repeat(1, w)
     xx = x.view(1, -1).repeat(h, 1)
 
-    meshed = torch.cat([xx.unsqueeze_(2), yy.unsqueeze_(2)], 2)
+    meshed = torch.cat([xx.unsqueeze(2), yy.unsqueeze(2)], 2)
 
+    saved_grids[combined_key] = meshed
     return meshed
+
+def get_inverse_kp_jacobian(kp):
+    """
+    Caches the inverse jacobian matrix on the keypoint to avoid
+    redundant GPU syncs
+    
+    See https://pytorch.org/docs/stable/generated/torch.linalg.inv.html#torch.linalg.inv
+    """
+    if 'inverse_jacobian' not in kp:
+        kp['inverse_jacobian'] = torch.inverse(kp['jacobian'])
+
+    return kp['inverse_jacobian']
 
 
 class ResBlock2d(nn.Module):

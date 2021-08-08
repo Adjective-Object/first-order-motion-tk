@@ -1,8 +1,10 @@
 from torch import nn
 import torch.nn.functional as F
 import torch
-from modules.util import Hourglass, AntiAliasInterpolation2d, make_coordinate_grid, kp2gaussian
+from modules.util import Hourglass, AntiAliasInterpolation2d, get_inverse_kp_jacobian, make_coordinate_grid, kp2gaussian
 
+
+cached_zeros = dict()
 
 class DenseMotionNetwork(nn.Module):
     """
@@ -38,8 +40,13 @@ class DenseMotionNetwork(nn.Module):
         gaussian_source = kp2gaussian(kp_source, spatial_size=spatial_size, kp_variance=self.kp_variance)
         heatmap = gaussian_driving - gaussian_source
 
+        combo_key = (heatmap.shape, spatial_size)
+        if combo_key not in cached_zeros:
+            print("zeroes cache miss???", combo_key)
+            cached_zeros[combo_key] = torch.zeros(heatmap.shape[0], 1, spatial_size[0], spatial_size[1]).type(heatmap.type())
+        zeros = cached_zeros[combo_key]
+
         #adding background feature
-        zeros = torch.zeros(heatmap.shape[0], 1, spatial_size[0], spatial_size[1]).type(heatmap.type())
         heatmap = torch.cat([zeros, heatmap], dim=1)
         heatmap = heatmap.unsqueeze(2)
         return heatmap
@@ -48,12 +55,14 @@ class DenseMotionNetwork(nn.Module):
         """
         Eq 4. in the paper T_{s<-d}(z)
         """
-        bs, _, h, w = source_image.shape
+        bs, _, h, w = source_image.shape 
         identity_grid = make_coordinate_grid((h, w), type=kp_source['value'].type())
         identity_grid = identity_grid.view(1, 1, h, w, 2)
         coordinate_grid = identity_grid - kp_driving['value'].view(bs, self.num_kp, 1, 1, 2)
         if 'jacobian' in kp_driving:
-            jacobian = torch.matmul(kp_source['jacobian'], torch.inverse(kp_driving['jacobian']))
+            # data sync happens here, see https://pytorch.org/docs/stable/generated/torch.linalg.inv.html#torch.linalg.inv
+            inverse_kp_driving = get_inverse_kp_jacobian(kp_driving)
+            jacobian = torch.matmul(kp_source['jacobian'], inverse_kp_driving)
             jacobian = jacobian.unsqueeze(-3).unsqueeze(-3)
             jacobian = jacobian.repeat(1, 1, h, w, 1, 1)
             coordinate_grid = torch.matmul(jacobian, coordinate_grid.unsqueeze(-1))
