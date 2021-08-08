@@ -664,8 +664,15 @@ class VideoDisplay(tk.Widget):
         self.image_label.pack(side="top")
         self.request_frame()
 
+        self.enabled = True
+
         # defer until tkinter has started
         self.after(0, lambda: asyncio.get_event_loop().create_task(asyncio.sleep(VIDEO_DISPLAY_FRAME_DELAY / 1000)).add_done_callback(self.poll_frame))
+
+    def set_preview_enabled(self, preview_enabled):
+        self.enabled = preview_enabled
+        if (self.enabled):
+            self.poll_frame()
 
     def set_cap(self, cap):
         self.cap = cap
@@ -692,15 +699,16 @@ class VideoDisplay(tk.Widget):
         """
         Polls for an available frame (populated from the thread pool executor in request_frame -> capture_frame)
         """
-        try:
-            if self.frame_needs_update:
-                self.frame_needs_update = False
-                self.imgtk = ImageTk.PhotoImage(image=self.img)
-                self.image_label.configure(image=self.imgtk)
-                self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_val else None
-                self.request_frame()
-        finally:
-            asyncio.get_event_loop().create_task(asyncio.sleep(VIDEO_DISPLAY_FRAME_DELAY / 1000)).add_done_callback(self.poll_frame)
+        if self.enabled:
+            try:
+                if self.frame_needs_update:
+                    self.frame_needs_update = False
+                    self.imgtk = ImageTk.PhotoImage(image=self.img)
+                    self.image_label.configure(image=self.imgtk)
+                    self.zoom_factor_val = self.zoom_factor_var.get() if self.zoom_factor_val else None
+                    self.request_frame()
+            finally:
+                asyncio.get_event_loop().create_task(asyncio.sleep(VIDEO_DISPLAY_FRAME_DELAY / 1000)).add_done_callback(self.poll_frame)
 
     def capture_frame(self):
         # print("capture_frame", os.getpid())
@@ -1073,7 +1081,7 @@ class Distorter(tk.Frame):
                     * (1 - FPS_COUNTER_FALLOFF_RATIO)
                     + (FPS_COUNTER_FALLOFF_RATIO * delta)
                 )
-            # print("%02.04f, , , %02.04f" % (now - start_time, delta))
+            # print("%02.04f, , , %02.04f (%02.04f fps)" % (now - start_time, delta, 1/delta))
             self.fps_var.set(
                 "fps: %01.01f" % (1 / (self.last_frame_interval_rolling_delta))
             )
@@ -1107,12 +1115,18 @@ class RunSimulationApplication(tk.Frame):
         self.adapt_movement_scale_var = tk.BooleanVar(self, True)
         self.adapt_movement_scale_var.trace("w", self.on_settings_var_updated)
 
+        self.camera_preview_enabled_var = tk.BooleanVar(self, True)
+        self.camera_preview_enabled_var.trace("w", self.on_camera_preview_enabled_var_updated)
+
         self.zoom_factor_var = tk.DoubleVar(self, 0.8)
         self.fps_var = tk.StringVar(self, "fps: ")
 
         self.master = master
         self.pack()
         self.create_widgets(initial_frame_img)
+
+    def on_camera_preview_enabled_var_updated(self, *argv):
+        self.video_display.set_preview_enabled(self.camera_preview_enabled_var.get())
 
     def on_settings_var_updated(self, *argv):
         self.cuda_worker_pool.update_settings(
@@ -1141,7 +1155,10 @@ class RunSimulationApplication(tk.Frame):
         )
         self.video_display.pack(side="right")
 
-        slider_frame = tk.Frame(self)
+        subwindow = tk.Toplevel(self)
+        subwindow.title("Face Borrower Settings")
+
+        slider_frame = tk.Frame(subwindow)
         slider_frame.pack(side="bottom")
 
         fps_label = tk.Label(slider_frame)
@@ -1166,7 +1183,7 @@ class RunSimulationApplication(tk.Frame):
         resetbutton["command"] = self.distorter.recalculate_initial_frame
         resetbutton.pack(side="right")
 
-        checkbox_frame = tk.Frame(self)
+        checkbox_frame = tk.Frame(subwindow)
         checkbox_frame.pack(side="bottom")
 
         checkbox_1 = tk.Checkbutton(
@@ -1190,12 +1207,21 @@ class RunSimulationApplication(tk.Frame):
         checkbox_3 = tk.Checkbutton(
             checkbox_frame,
             selectcolor="red",
-            text="adapt_movement_scale",
+            text="scale_movement",
             onvalue=True,
             offvalue=False,
             variable=self.adapt_movement_scale_var,
         )
         checkbox_3.pack(side="left")
+        checkbox_4 = tk.Checkbutton(
+            checkbox_frame,
+            selectcolor="red",
+            text="show_camera",
+            onvalue=True,
+            offvalue=False,
+            variable=self.camera_preview_enabled_var,
+        )
+        checkbox_4.pack(side="left")
 
 
 executor = None
@@ -1226,6 +1252,7 @@ def main():
     debug("main process started")
 
     root = tk.Tk()
+    root.title("Face Borrower")
     inputs_set = False
     param_source_img = None
     param_video_cap = None
@@ -1268,6 +1295,7 @@ def main():
 
     def release_app():
         get_inputs_app.destroy()
+        root.geometry("512x256")
         app2 = RunSimulationApplication(
             initial_frame_img=param_source_img,
             video_capture=param_video_cap,
@@ -1288,7 +1316,7 @@ def main():
             )
         )
 
-        root.destroy()
+    root.destroy()
 
 
 if __name__ == "__main__":
