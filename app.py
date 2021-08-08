@@ -44,7 +44,10 @@ TRACE_MALLOC = '--trace' in argv
 TRACE_GC = '--trace-gc' in argv
 DEBUG = "-v" in argv or "--verbose" in argv
 header = ("[%s]" if __name__ == "__main__" else "(%s)") % os.getpid()
-
+ML_FRAME_INTERVAL = 1000 / 24
+TKINTER_PERIOD = 1000 / 120
+WORKER_POOL_PERIOD = 1000 / 120
+FPS_COUNTER_FALLOFF_RATIO = 0.018
 
 def debug(*argv, **kwarg):
     if not DEBUG:
@@ -953,13 +956,10 @@ class GetInputsApplication(tk.Frame):
             int(self.worker_count_str_var.get())
         )
 
-ML_FRAME_INTERVAL = 1000 // 24
 
 def prep_image_for_ml(prepped_frame):
     return np.array(prepped_frame)[:, :, :3] / 255
 
-
-FPS_COUNTER_FALLOFF_RATIO = 0.018
 
 
 class Distorter(tk.Frame):
@@ -1293,7 +1293,7 @@ def main():
     if frame is None:
         raise Exception("could not get an initial frame from video source. crashing.")
 
-    def release_app():
+    def switch_apps():
         get_inputs_app.destroy()
         root.geometry("512x256")
         app2 = RunSimulationApplication(
@@ -1303,7 +1303,7 @@ def main():
             master=root,
         )
 
-    cuda_worker_pool = CUDAWorkerPool(param_worker_count, on_ready=release_app)
+    cuda_worker_pool = CUDAWorkerPool(param_worker_count, on_ready=switch_apps)
     initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
     with cuda_worker_pool.entry_context(source_img_arr, initial_image_arr):
         global start_time
@@ -1311,8 +1311,8 @@ def main():
 
         loop.run_until_complete(
             asyncio.gather(
-                run_tk(root, lambda: False),
-                periodic(cuda_worker_pool.step_loop)
+                run_tk(root, lambda: False, TKINTER_PERIOD),
+                periodic(cuda_worker_pool.step_loop, WORKER_POOL_PERIOD)
             )
         )
 
