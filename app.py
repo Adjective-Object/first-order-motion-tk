@@ -351,7 +351,7 @@ class NotifyWorkerReady:
 
 JOB_SLOTS_PER_WORKER = 2
 class CUDAWorkerPool:
-    def __init__(self, pool_size):
+    def __init__(self, pool_size, on_ready=None):
         # we have to use spawn here rather than fork, because CUDA cannot be reinitialized
         # in forked processes
         self.ctx = mp.get_context("spawn")
@@ -360,6 +360,8 @@ class CUDAWorkerPool:
         self.child_to_parent_message_queue = self.ctx.Queue()
 
         self._pool_size = pool_size
+        self._ready_workers = 0
+        self._on_ready = on_ready
 
         # allocate more shared_data slots than cuda pools.
         # we want to process the next frame before the shared memory slot
@@ -387,6 +389,11 @@ class CUDAWorkerPool:
                         )
                     ]
                     future.set_result(child_message)
+                elif isinstance(child_message, NotifyWorkerReady):
+                    print("ready workers", self._ready_workers)
+                    self._ready_workers += 1
+                    if self._ready_workers == self._pool_size and self._on_ready is not None:
+                        self._on_ready()
 
     def release_request(self, child_message: CUDARunRequest):
         io_pair = (
@@ -733,6 +740,11 @@ class VideoCapture(tk.Widget):
         self.selected_camera.trace("w", self.update_capture)
         asyncio.get_event_loop().create_task(asyncio.sleep(1 / 1000)).add_done_callback(self.update_camera_list_and_repack)
 
+    def disable_ui(self):
+        self.refresh_button['state'] = tk.DISABLED
+        self.reopen_button['state'] = tk.DISABLED
+        self.cam_dropdown['state'] = tk.DISABLED
+
     def repack(self):
         self.refresh_button.pack(side="bottom")
         self.reopen_button.pack(side="bottom")
@@ -820,7 +832,7 @@ class GetInputsApplication(tk.Frame):
         bottom_frame.pack(side="bottom")
 
         self.steal_button = tk.Button(bottom_frame)
-        self.steal_button["command"] = self.run_stolen_face
+        self.steal_button["command"] = self.request_prewarm_workers
         self.steal_button["text"] = "Borrow that face!"
         self.steal_button["state"] = tk.DISABLED
         self.steal_button.pack(side="right")
@@ -828,8 +840,8 @@ class GetInputsApplication(tk.Frame):
         worker_count_dropdown_label = tk.Label(bottom_frame)
         worker_count_dropdown_label["text"] = "Worker Count"
         worker_count_dropdown_label.pack(side="left")
-        worker_count_dropdown = tk.OptionMenu(bottom_frame, self.worker_count_str_var, 1,2,3,4,5)
-        worker_count_dropdown.pack(side="left")
+        self.worker_count_dropdown = tk.OptionMenu(bottom_frame, self.worker_count_str_var, 1,2,3,4,5)
+        self.worker_count_dropdown.pack(side="left")
 
         self.loading_label = tk.Label(
             self, fg="green" if was_model_loaded_at_start() else "red"
@@ -917,14 +929,21 @@ class GetInputsApplication(tk.Frame):
         else:
             self.steal_button["state"] = tk.DISABLED
 
-    def run_stolen_face(self):
-        if (
-            self.img is not None
-            and self.video_capture.video_display.cap is not None
-            and self.video_capture.video_display.cap.isOpened()
-        ):
-            self.on_load_complete(self.img, self.video_capture.video_display.cap, int(self.worker_count_str_var.get()))
-            self.quit()
+    def request_prewarm_workers(self):
+        self.steal_button["state"] = tk.DISABLED
+        self.select_image_button["state"] = tk.DISABLED
+        self.worker_count_dropdown["state"] = tk.DISABLED
+        self.video_capture.disable_ui()
+
+        self.loading_label["text"] = (
+            "Warming worker pool.."
+        )
+
+        self.on_load_complete(
+            self.img,
+            self.video_capture.video_display.cap,
+            int(self.worker_count_str_var.get())
+        )
 
 ML_FRAME_INTERVAL = 1000 // 24
 
@@ -1230,16 +1249,6 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    get_inputs_app.destroy()
-
-    # print("parameters:",
-    #         param_source_img,
-    #         param_video_cap,
-    #         param_worker_count,
-    # )
-
-    cuda_worker_pool = CUDAWorkerPool(param_worker_count)
-
     if param_source_img is None or param_video_cap is None:
         raise Exception(
             "failed to initialize? source_img=%s, param_video_cap=%s"
@@ -1257,8 +1266,8 @@ def main():
     if frame is None:
         raise Exception("could not get an initial frame from video source. crashing.")
 
-    initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
-    with cuda_worker_pool.entry_context(source_img_arr, initial_image_arr):
+    def release_app():
+        get_inputs_app.destroy()
         app2 = RunSimulationApplication(
             initial_frame_img=param_source_img,
             video_capture=param_video_cap,
@@ -1266,6 +1275,9 @@ def main():
             master=root,
         )
 
+    cuda_worker_pool = CUDAWorkerPool(param_worker_count, on_ready=release_app)
+    initial_image_arr = np.array(prep_frame(frame), dtype=np.uint8)
+    with cuda_worker_pool.entry_context(source_img_arr, initial_image_arr):
         global start_time
         start_time = time.time()
 
